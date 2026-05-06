@@ -156,7 +156,7 @@ Slint + winit + software renderer.
 - deterministic rendering
 
 ### Downside
-- current optimized runtime stub is still above the < 3 MB target on this toolchain
+- current optimized runtime stub is still above the < 3 MB target on this toolchain (~7.2 MB in the current release build)
 
 ### Recommendation
 Keep this as the UX baseline.

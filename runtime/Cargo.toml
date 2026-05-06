@@ -11,7 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 memmap2.workspace = true
 rayon.workspace = true
 slint = { version = "1.7", default-features = false, features = ["renderer-software", "backend-winit", "std", "compat-1-2"] }

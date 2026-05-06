@@ -43,11 +43,12 @@ Implemented:
 - Slint-based installer wizard
 - `--silent` runtime mode
 - dual runtime stubs for normal/admin installers
+- hand-written runtime CLI parser to keep the stub lean
 
 Known issue:
 
 - release `packager.exe` fits target well
-- release `runtime.exe` is still above the long-term `< 3 MB` target with current Slint+winit software-renderer stack
+- release `runtime.exe` is down to roughly `7.2 MB` here, but still above the long-term `< 3 MB` target with the current Slint+winit software-renderer stack
 - GUI installs keep sequential extraction for smooth progress reporting; silent installs use the fast path
 
 ## Build
@@ -130,5 +131,6 @@ exclude = ["*.pdb"]
 
 ## Short roadmap
 
-- reduce runtime stub size
-- v2 indexed payload format for true parallel extraction
+- reduce runtime stub size further
+- chunk very large files into multiple frames for intra-file parallel extraction
+- rollback / cleanup on failed installs

@@ -3966,7 +3966,6 @@ name = "setupweaver-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "memmap2",
  "rayon",
  "setupweaver-common",
