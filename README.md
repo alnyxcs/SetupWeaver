@@ -36,11 +36,13 @@ Implemented:
 - indexed payload manifest + chunked zstd frames
 - runtime payload mmap + zero-copy manifest loading
 - file extraction
+- install state recording
+- silent uninstall
 - registry writes
 - PATH mutation
 - desktop shortcut creation
 - post-install hooks
-- best-effort rollback of newly created files/shortcuts on install failure
+- rollback of newly created files/shortcuts plus in-session registry/PATH changes on install failure
 - Slint-based installer wizard
 - `--silent` runtime mode
 - dual runtime stubs for normal/admin installers
@@ -52,6 +54,7 @@ Known issue:
 - release `runtime.exe` is down to roughly `7.2 MB` here, but still above the long-term `< 3 MB` target with the current Slint+winit software-renderer stack
 - GUI installs keep sequential extraction for smooth progress reporting
 - silent installs now parallelize both across files and across chunks of a large single file
+- reinstall over an existing managed install is still intentionally blocked for safety; uninstall first
 
 ## Build
 
@@ -89,6 +92,12 @@ Silent install:
 
 ```bash
 ./target/release/hello-setup.exe --silent
+```
+
+Silent uninstall:
+
+```bash
+./target/release/hello-setup.exe --uninstall --install-dir "C:\\Program Files\\Hello App"
 ```
 
 If `install.require_admin = true`, the packager automatically switches to the admin stub and preserves the embedded `requireAdministrator` manifest.
@@ -135,4 +144,4 @@ exclude = ["*.pdb"]
 
 - reduce runtime stub size further
 - stream payload assembly in the packager to reduce peak RAM
-- transactional rollback for overwritten files / registry / PATH
+- safe in-place upgrade / reinstall for an existing managed install

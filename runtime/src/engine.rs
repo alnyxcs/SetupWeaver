@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
-use setupweaver_common::{PackagedFile, PackagedInstaller, RunWhen, ShortcutSpec};
+use setupweaver_common::{
+    InstallState, InstalledRegistryValue, PackagedFile, PackagedInstaller, PathEntryState, RawRegistryValue, RunWhen,
+    ShortcutSpec, INSTALL_STATE_DIR_NAME, INSTALL_STATE_FILE_NAME, UNINSTALLER_FILE_NAME,
+};
 use thiserror::Error;
 
 use crate::payload::{EmbeddedPayload, PayloadError};
@@ -97,6 +100,34 @@ pub enum EngineError {
     InvalidArguments { value: String, reason: String },
     #[error("failed to read embedded archive: {0}")]
     Archive(#[from] std::io::Error),
+    #[error("failed to read install state {path}: {source}")]
+    ReadState {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse install state {path}: {source}")]
+    ParseState {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to write install state {path}: {source}")]
+    WriteState {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to copy uninstall helper to {path}: {source}")]
+    CopyUninstaller {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("no install state found in {0}")]
+    MissingInstallState(PathBuf),
+    #[error("install directory already contains a different app: {found_app}")]
+    InstallConflict { found_app: String },
     #[cfg(windows)]
     #[error("registry operation failed for {key} ({value_name}): {source}")]
     RegistryIo {
@@ -146,9 +177,21 @@ impl InstallerEngine {
 
     pub fn install(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
         let context = InstallContext::for_manifest(&self.manifest, install_dir)?;
+        self.ensure_install_target_available(&context)?;
         let plans = self.build_extract_plans(&context)?;
         let mut rollback = self.extract_files_parallel(&plans)?;
-        if let Err(error) = self.configure_system(&context, &mut rollback) {
+        let metadata = match self.configure_system(&context, &mut rollback) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                rollback.rollback();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.persist_install_state(&context, &plans, &metadata, &mut rollback) {
+            rollback.rollback();
+            return Err(error);
+        }
+        if let Err(error) = self.run_hooks(&context, RunWhen::After) {
             rollback.rollback();
             return Err(error);
         }
@@ -160,6 +203,7 @@ impl InstallerEngine {
         F: FnMut(InstallProgress),
     {
         let context = InstallContext::for_manifest(&self.manifest, install_dir)?;
+        self.ensure_install_target_available(&context)?;
         let plans = self.build_extract_plans(&context)?;
         let total_files = self.manifest.payload.len();
         let total_bytes = self.manifest.payload.iter().map(|file| file.size).sum();
@@ -177,7 +221,7 @@ impl InstallerEngine {
 
         let (mut rollback, completed_files, completed_bytes) =
             self.extract_files_with_progress(&plans, &mut progress, total_files, total_bytes)?;
-        if let Err(error) = self.configure_system_with_progress(
+        let metadata = match self.configure_system_with_progress(
             &context,
             &mut progress,
             &mut rollback,
@@ -186,6 +230,37 @@ impl InstallerEngine {
             total_files,
             total_bytes,
         ) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                rollback.rollback();
+                return Err(error);
+            }
+        };
+        progress(InstallProgress::new(
+            InstallPhase::Configuring,
+            0.985,
+            "Writing uninstall data",
+            context.install_dir.display().to_string(),
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        ));
+        if let Err(error) = self.persist_install_state(&context, &plans, &metadata, &mut rollback) {
+            rollback.rollback();
+            return Err(error);
+        }
+        progress(InstallProgress::new(
+            InstallPhase::Finishing,
+            0.99,
+            "Starting post-install tasks",
+            self.manifest.config.app.name.clone(),
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        ));
+        if let Err(error) = self.run_hooks(&context, RunWhen::After) {
             rollback.rollback();
             return Err(error);
         }
@@ -195,6 +270,12 @@ impl InstallerEngine {
     pub fn finish(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
         let context = InstallContext::for_manifest(&self.manifest, install_dir)?;
         self.run_hooks(&context, RunWhen::Finish)
+    }
+
+    pub fn uninstall(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
+        let install_dir = resolve_uninstall_dir(install_dir, self.payload.exe_path(), self.default_install_dir()?.as_path())?;
+        let state = load_install_state(&install_dir)?;
+        self.uninstall_from_state(&state, self.payload.exe_path())
     }
 
     fn build_extract_plans(&self, context: &InstallContext) -> Result<Vec<ExtractPlan>, EngineError> {
@@ -360,11 +441,15 @@ impl InstallerEngine {
             })
     }
 
-    fn configure_system(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<(), EngineError> {
-        self.apply_registry(context)?;
-        self.update_path(context)?;
-        self.create_shortcuts(context, rollback)?;
-        self.run_hooks(context, RunWhen::After)
+    fn configure_system(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<InstallMetadata, EngineError> {
+        let registry_values = self.apply_registry(context, rollback)?;
+        let path_entry = self.update_path(context, rollback)?;
+        let shortcuts = self.create_shortcuts(context, rollback)?;
+        Ok(InstallMetadata {
+            registry_values,
+            path_entry,
+            shortcuts,
+        })
     }
 
     fn configure_system_with_progress(
@@ -376,7 +461,7 @@ impl InstallerEngine {
         completed_bytes: u64,
         total_files: usize,
         total_bytes: u64,
-    ) -> Result<(), EngineError> {
+    ) -> Result<InstallMetadata, EngineError> {
         progress(InstallProgress::new(
             InstallPhase::Configuring,
             0.90,
@@ -387,7 +472,7 @@ impl InstallerEngine {
             completed_bytes,
             total_bytes,
         ));
-        self.apply_registry(context)?;
+        let registry_values = self.apply_registry(context, rollback)?;
 
         progress(InstallProgress::new(
             InstallPhase::Configuring,
@@ -399,7 +484,7 @@ impl InstallerEngine {
             completed_bytes,
             total_bytes,
         ));
-        self.update_path(context)?;
+        let path_entry = self.update_path(context, rollback)?;
 
         progress(InstallProgress::new(
             InstallPhase::Configuring,
@@ -411,19 +496,109 @@ impl InstallerEngine {
             completed_bytes,
             total_bytes,
         ));
-        self.create_shortcuts(context, rollback)?;
+        let shortcuts = self.create_shortcuts(context, rollback)?;
 
-        progress(InstallProgress::new(
-            InstallPhase::Finishing,
-            0.99,
-            "Starting post-install tasks",
-            self.manifest.config.app.name.clone(),
-            completed_files,
-            total_files,
-            completed_bytes,
-            total_bytes,
-        ));
-        self.run_hooks(context, RunWhen::After)
+        Ok(InstallMetadata {
+            registry_values,
+            path_entry,
+            shortcuts,
+        })
+    }
+
+    fn ensure_install_target_available(&self, context: &InstallContext) -> Result<(), EngineError> {
+        if !install_state_path(&context.install_dir).exists() {
+            return Ok(());
+        }
+
+        let state = load_install_state(&context.install_dir)?;
+        if state.app_name == self.manifest.config.app.name {
+            return Err(EngineError::InstallConflict {
+                found_app: format!("{} {}", state.app_name, state.app_version),
+            });
+        }
+
+        Err(EngineError::InstallConflict {
+            found_app: state.app_name,
+        })
+    }
+
+    fn persist_install_state(
+        &self,
+        context: &InstallContext,
+        plans: &[ExtractPlan],
+        metadata: &InstallMetadata,
+        rollback: &mut InstallRollback,
+    ) -> Result<(), EngineError> {
+        let state_dir = install_state_dir(&context.install_dir);
+        fs::create_dir_all(&state_dir).map_err(|source| EngineError::CreateDir {
+            path: state_dir.clone(),
+            source,
+        })?;
+
+        let uninstaller_path = uninstaller_path(&context.install_dir);
+        let uninstaller_existed = uninstaller_path.exists();
+        fs::copy(self.payload.exe_path(), &uninstaller_path).map_err(|source| EngineError::CopyUninstaller {
+            path: uninstaller_path.clone(),
+            source,
+        })?;
+        if !uninstaller_existed {
+            rollback.record_created_file(uninstaller_path.clone());
+        }
+
+        let state = InstallState {
+            app_name: self.manifest.config.app.name.clone(),
+            app_version: self.manifest.config.app.version.clone(),
+            install_dir: context.install_dir.display().to_string(),
+            installed_files: plans
+                .iter()
+                .map(|plan| plan.output_path.display().to_string())
+                .collect(),
+            shortcuts: metadata
+                .shortcuts
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            registry_values: metadata.registry_values.clone(),
+            path_entry: metadata.path_entry.clone(),
+        };
+
+        let state_path = install_state_path(&context.install_dir);
+        let state_text = toml::to_string_pretty(&state).expect("state serialization must succeed");
+        fs::write(&state_path, state_text).map_err(|source| EngineError::WriteState {
+            path: state_path.clone(),
+            source,
+        })?;
+        rollback.record_created_file(state_path);
+        Ok(())
+    }
+
+    fn uninstall_from_state(&self, state: &InstallState, current_exe: &Path) -> Result<(), EngineError> {
+        let install_dir = PathBuf::from(&state.install_dir);
+        for shortcut in &state.shortcuts {
+            let _ = fs::remove_file(shortcut);
+        }
+
+        for path in &state.installed_files {
+            let _ = fs::remove_file(path);
+        }
+
+        restore_registry_values(&state.registry_values)?;
+        restore_path_entry(state.path_entry.as_ref())?;
+
+        let state_path = install_state_path(&install_dir);
+        let helper_path = uninstaller_path(&install_dir);
+        let state_dir = install_state_dir(&install_dir);
+
+        if current_exe == helper_path {
+            schedule_self_delete(current_exe, &state_path, &state_dir)?;
+        } else {
+            let _ = fs::remove_file(&helper_path);
+            let _ = fs::remove_file(&state_path);
+            let _ = fs::remove_dir(&state_dir);
+        }
+
+        let _ = fs::remove_dir(&install_dir);
+        Ok(())
     }
 
     fn run_hooks(&self, context: &InstallContext, when: RunWhen) -> Result<(), EngineError> {
@@ -448,15 +623,16 @@ impl InstallerEngine {
     }
 
     #[cfg(not(windows))]
-    fn apply_registry(&self, _context: &InstallContext) -> Result<(), EngineError> {
-        Ok(())
+    fn apply_registry(&self, _context: &InstallContext, _rollback: &mut InstallRollback) -> Result<Vec<InstalledRegistryValue>, EngineError> {
+        Ok(Vec::new())
     }
 
     #[cfg(windows)]
-    fn apply_registry(&self, context: &InstallContext) -> Result<(), EngineError> {
+    fn apply_registry(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<Vec<InstalledRegistryValue>, EngineError> {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
         use winreg::RegKey;
 
+        let mut installed = Vec::new();
         for entry in &self.manifest.config.registry {
             let (hive_name, subkey) = split_registry_key(&entry.key)
                 .ok_or_else(|| EngineError::UnsupportedRegistryHive(entry.key.clone()))?;
@@ -474,70 +650,88 @@ impl InstallerEngine {
             })?;
 
             for value in &entry.values {
-                let data = resolve_arg_tokens(&value.data, context);
+                let previous = match target_key.get_raw_value(&value.name) {
+                    Ok(raw) => Some(RawRegistryValue {
+                        reg_type: raw.vtype as u32,
+                        bytes: raw.bytes,
+                    }),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(source) => {
+                        return Err(EngineError::RegistryIo {
+                            key: entry.key.clone(),
+                            value_name: value.name.clone(),
+                            source,
+                        });
+                    }
+                };
+
+                let change = InstalledRegistryValue {
+                    key: entry.key.clone(),
+                    value_name: value.name.clone(),
+                    previous,
+                };
                 match value.value_type {
                     setupweaver_common::RegistryValueType::String => target_key
-                        .set_value(&value.name, &data)
+                        .set_value(&value.name, &resolve_arg_tokens(&value.data, context))
                         .map_err(|source| EngineError::RegistryIo {
                             key: entry.key.clone(),
                             value_name: value.name.clone(),
                             source,
                         })?,
                     setupweaver_common::RegistryValueType::Dword => {
-                        let parsed: u32 = data.parse().map_err(|_| EngineError::ResolvePath {
+                        let parsed: u32 = resolve_arg_tokens(&value.data, context).parse().map_err(|_| EngineError::ResolvePath {
                             template: value.data.clone(),
                             reason: String::from("DWORD data must parse as u32"),
                         })?;
-                        target_key
-                            .set_value(&value.name, &parsed)
-                            .map_err(|source| EngineError::RegistryIo {
-                                key: entry.key.clone(),
-                                value_name: value.name.clone(),
-                                source,
-                            })?;
+                        target_key.set_value(&value.name, &parsed).map_err(|source| EngineError::RegistryIo {
+                            key: entry.key.clone(),
+                            value_name: value.name.clone(),
+                            source,
+                        })?;
                     }
                     setupweaver_common::RegistryValueType::Qword => {
-                        let parsed: u64 = data.parse().map_err(|_| EngineError::ResolvePath {
+                        let parsed: u64 = resolve_arg_tokens(&value.data, context).parse().map_err(|_| EngineError::ResolvePath {
                             template: value.data.clone(),
                             reason: String::from("QWORD data must parse as u64"),
                         })?;
-                        target_key
-                            .set_value(&value.name, &parsed)
-                            .map_err(|source| EngineError::RegistryIo {
-                                key: entry.key.clone(),
-                                value_name: value.name.clone(),
-                                source,
-                            })?;
+                        target_key.set_value(&value.name, &parsed).map_err(|source| EngineError::RegistryIo {
+                            key: entry.key.clone(),
+                            value_name: value.name.clone(),
+                            source,
+                        })?;
                     }
                 }
+                rollback.record_registry_change(change.clone());
+                installed.push(change);
             }
         }
 
-        Ok(())
+        Ok(installed)
     }
 
     #[cfg(not(windows))]
-    fn update_path(&self, _context: &InstallContext) -> Result<(), EngineError> {
-        Ok(())
+    fn update_path(&self, _context: &InstallContext, _rollback: &mut InstallRollback) -> Result<Option<PathEntryState>, EngineError> {
+        Ok(None)
     }
 
     #[cfg(windows)]
-    fn update_path(&self, context: &InstallContext) -> Result<(), EngineError> {
+    fn update_path(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<Option<PathEntryState>, EngineError> {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ};
         use winreg::{RegKey, RegValue};
 
         if !self.manifest.config.install.add_to_path {
-            return Ok(());
+            return Ok(None);
         }
 
-        let (key_name, root, subkey) = if self.manifest.config.install.require_admin {
+        let (key_name, root, subkey, system) = if self.manifest.config.install.require_admin {
             (
                 String::from("HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"),
                 RegKey::predef(HKEY_LOCAL_MACHINE),
                 "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+                true,
             )
         } else {
-            (String::from("HKCU\\Environment"), RegKey::predef(HKEY_CURRENT_USER), "Environment")
+            (String::from("HKCU\\Environment"), RegKey::predef(HKEY_CURRENT_USER), "Environment", false)
         };
 
         let (env_key, _) = root.create_subkey(subkey).map_err(|source| EngineError::RegistryIo {
@@ -561,7 +755,7 @@ impl InstallerEngine {
         let install_dir = context.install_dir.display().to_string();
         let updated = append_path_entry(&current, &install_dir);
         if updated == current {
-            return Ok(());
+            return Ok(None);
         }
 
         let value = RegValue {
@@ -569,23 +763,31 @@ impl InstallerEngine {
             vtype: REG_EXPAND_SZ,
         };
         env_key.set_raw_value("Path", &value).map_err(|source| EngineError::RegistryIo {
-            key: key_name,
+            key: key_name.clone(),
             value_name: String::from("Path"),
             source,
         })?;
+        rollback.record_path_restore(PathRestore {
+            key: key_name,
+            previous: current,
+        });
 
         broadcast_environment_change()?;
-        Ok(())
+        Ok(Some(PathEntryState {
+            entry: install_dir,
+            system,
+        }))
     }
 
     #[cfg(not(windows))]
-    fn create_shortcuts(&self, _context: &InstallContext, _rollback: &mut InstallRollback) -> Result<(), EngineError> {
-        Ok(())
+    fn create_shortcuts(&self, _context: &InstallContext, _rollback: &mut InstallRollback) -> Result<Vec<PathBuf>, EngineError> {
+        Ok(Vec::new())
     }
 
     #[cfg(windows)]
-    fn create_shortcuts(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<(), EngineError> {
+    fn create_shortcuts(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<Vec<PathBuf>, EngineError> {
         let mut shortcuts = Vec::new();
+        let mut created_paths = Vec::new();
 
         if self.manifest.config.shortcuts.is_empty() && self.manifest.config.install.create_desktop_shortcut {
             shortcuts.push(ShortcutSpec {
@@ -621,10 +823,11 @@ impl InstallerEngine {
                 &icon,
                 target.parent(),
             )?;
-            rollback.record_shortcut(link_path);
+            rollback.record_shortcut(link_path.clone());
+            created_paths.push(link_path);
         }
 
-        Ok(())
+        Ok(created_paths)
     }
 }
 
@@ -636,11 +839,24 @@ struct ExtractPlan {
     created_dirs: Vec<PathBuf>,
 }
 
+struct InstallMetadata {
+    registry_values: Vec<InstalledRegistryValue>,
+    path_entry: Option<PathEntryState>,
+    shortcuts: Vec<PathBuf>,
+}
+
+struct PathRestore {
+    key: String,
+    previous: String,
+}
+
 #[derive(Default)]
 struct InstallRollback {
     created_files: Vec<PathBuf>,
     created_dirs: Vec<PathBuf>,
     created_shortcuts: Vec<PathBuf>,
+    registry_changes: Vec<InstalledRegistryValue>,
+    path_restore: Option<PathRestore>,
 }
 
 impl InstallRollback {
@@ -651,11 +867,26 @@ impl InstallRollback {
         self.created_dirs.extend(plan.created_dirs.iter().cloned());
     }
 
+    fn record_created_file(&mut self, path: PathBuf) {
+        self.created_files.push(path);
+    }
+
     fn record_shortcut(&mut self, path: PathBuf) {
         self.created_shortcuts.push(path);
     }
 
+    fn record_registry_change(&mut self, change: InstalledRegistryValue) {
+        self.registry_changes.push(change);
+    }
+
+    fn record_path_restore(&mut self, path_restore: PathRestore) {
+        self.path_restore = Some(path_restore);
+    }
+
     fn rollback(self) {
+        let _ = restore_registry_values(&self.registry_changes);
+        let _ = restore_path_value(self.path_restore.as_ref());
+
         for path in self.created_shortcuts.into_iter().rev() {
             let _ = fs::remove_file(path);
         }
@@ -742,6 +973,46 @@ fn resolve_arg_tokens(input: &str, context: &InstallContext) -> String {
         .replace("{Temp}", &context.temp.display().to_string())
         .replace("{AppName}", &context.app_name)
         .replace("{install_dir}", &context.install_dir.display().to_string())
+}
+
+fn install_state_dir(install_dir: &Path) -> PathBuf {
+    install_dir.join(INSTALL_STATE_DIR_NAME)
+}
+
+fn install_state_path(install_dir: &Path) -> PathBuf {
+    install_state_dir(install_dir).join(INSTALL_STATE_FILE_NAME)
+}
+
+fn uninstaller_path(install_dir: &Path) -> PathBuf {
+    install_state_dir(install_dir).join(UNINSTALLER_FILE_NAME)
+}
+
+fn load_install_state(install_dir: &Path) -> Result<InstallState, EngineError> {
+    let path = install_state_path(install_dir);
+    let content = fs::read_to_string(&path).map_err(|source| EngineError::ReadState {
+        path: path.clone(),
+        source,
+    })?;
+    toml::from_str(&content).map_err(|source| EngineError::ParseState { path, source })
+}
+
+fn resolve_uninstall_dir(install_dir_override: Option<&Path>, current_exe: &Path, fallback: &Path) -> Result<PathBuf, EngineError> {
+    if let Some(path) = install_dir_override {
+        return Ok(path.to_path_buf());
+    }
+
+    if current_exe.file_name().is_some_and(|name| name == UNINSTALLER_FILE_NAME)
+        && current_exe.parent().is_some_and(|parent| parent.file_name().is_some_and(|name| name == INSTALL_STATE_DIR_NAME))
+    {
+        return Ok(current_exe.parent().and_then(Path::parent).unwrap_or(fallback).to_path_buf());
+    }
+
+    let fallback = fallback.to_path_buf();
+    if install_state_path(&fallback).exists() {
+        Ok(fallback)
+    } else {
+        Err(EngineError::MissingInstallState(fallback))
+    }
 }
 
 fn missing_parent_dirs(parent: Option<&Path>) -> Vec<PathBuf> {
@@ -893,6 +1164,16 @@ fn append_path_entry(current: &str, entry: &str) -> String {
     }
 }
 
+fn remove_path_entry(current: &str, entry: &str) -> String {
+    let normalized_entry = normalize_env_path(entry);
+    current
+        .split(';')
+        .filter(|candidate| !normalize_env_path(candidate).eq_ignore_ascii_case(&normalized_entry))
+        .filter(|candidate| !candidate.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn normalize_env_path(value: &str) -> String {
     let mut normalized = value.trim().replace('/', "\\");
     while normalized.ends_with('\\') && normalized.len() > 3 {
@@ -915,6 +1196,208 @@ fn file_label(path: &Path) -> String {
         .and_then(|value| value.to_str())
         .map(String::from)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+#[cfg(not(windows))]
+fn restore_registry_values(_changes: &[InstalledRegistryValue]) -> Result<(), EngineError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn registry_type_from_u32(value: u32) -> winreg::enums::RegType {
+    use winreg::enums::*;
+
+    match value {
+        x if x == REG_NONE as u32 => REG_NONE,
+        x if x == REG_SZ as u32 => REG_SZ,
+        x if x == REG_EXPAND_SZ as u32 => REG_EXPAND_SZ,
+        x if x == REG_BINARY as u32 => REG_BINARY,
+        x if x == REG_DWORD as u32 => REG_DWORD,
+        x if x == REG_DWORD_BIG_ENDIAN as u32 => REG_DWORD_BIG_ENDIAN,
+        x if x == REG_LINK as u32 => REG_LINK,
+        x if x == REG_MULTI_SZ as u32 => REG_MULTI_SZ,
+        x if x == REG_RESOURCE_LIST as u32 => REG_RESOURCE_LIST,
+        x if x == REG_FULL_RESOURCE_DESCRIPTOR as u32 => REG_FULL_RESOURCE_DESCRIPTOR,
+        x if x == REG_RESOURCE_REQUIREMENTS_LIST as u32 => REG_RESOURCE_REQUIREMENTS_LIST,
+        x if x == REG_QWORD as u32 => REG_QWORD,
+        _ => REG_BINARY,
+    }
+}
+
+#[cfg(windows)]
+fn restore_registry_values(changes: &[InstalledRegistryValue]) -> Result<(), EngineError> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::{RegKey, RegValue};
+
+    for change in changes.iter().rev() {
+        let (hive_name, subkey) = split_registry_key(&change.key)
+            .ok_or_else(|| EngineError::UnsupportedRegistryHive(change.key.clone()))?;
+        let root = match hive_name {
+            "HKCU" => RegKey::predef(HKEY_CURRENT_USER),
+            "HKLM" => RegKey::predef(HKEY_LOCAL_MACHINE),
+            _ => return Err(EngineError::UnsupportedRegistryHive(change.key.clone())),
+        };
+
+        let (target_key, _) = root.create_subkey(subkey).map_err(|source| EngineError::RegistryIo {
+            key: change.key.clone(),
+            value_name: String::from("<create_subkey>"),
+            source,
+        })?;
+
+        match &change.previous {
+            Some(previous) => target_key
+                .set_raw_value(
+                    &change.value_name,
+                    &RegValue {
+                        vtype: registry_type_from_u32(previous.reg_type),
+                        bytes: previous.bytes.clone(),
+                    },
+                )
+                .map_err(|source| EngineError::RegistryIo {
+                    key: change.key.clone(),
+                    value_name: change.value_name.clone(),
+                    source,
+                })?,
+            None => match target_key.delete_value(&change.value_name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(EngineError::RegistryIo {
+                        key: change.key.clone(),
+                        value_name: change.value_name.clone(),
+                        source,
+                    });
+                }
+            },
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn restore_path_value(_restore: Option<&PathRestore>) -> Result<(), EngineError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_path_value(restore: Option<&PathRestore>) -> Result<(), EngineError> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ};
+    use winreg::{RegKey, RegValue};
+
+    let Some(restore) = restore else {
+        return Ok(());
+    };
+    let (hive_name, subkey) = split_registry_key(&restore.key)
+        .ok_or_else(|| EngineError::UnsupportedRegistryHive(restore.key.clone()))?;
+    let root = match hive_name {
+        "HKCU" => RegKey::predef(HKEY_CURRENT_USER),
+        "HKLM" => RegKey::predef(HKEY_LOCAL_MACHINE),
+        _ => return Err(EngineError::UnsupportedRegistryHive(restore.key.clone())),
+    };
+    let (target_key, _) = root.create_subkey(subkey).map_err(|source| EngineError::RegistryIo {
+        key: restore.key.clone(),
+        value_name: String::from("Path"),
+        source,
+    })?;
+    target_key
+        .set_raw_value(
+            "Path",
+            &RegValue {
+                bytes: encode_utf16_nul(&restore.previous),
+                vtype: REG_EXPAND_SZ,
+            },
+        )
+        .map_err(|source| EngineError::RegistryIo {
+            key: restore.key.clone(),
+            value_name: String::from("Path"),
+            source,
+        })?;
+    broadcast_environment_change()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn restore_path_entry(_path_entry: Option<&PathEntryState>) -> Result<(), EngineError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_path_entry(path_entry: Option<&PathEntryState>) -> Result<(), EngineError> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ};
+    use winreg::{RegKey, RegValue};
+
+    let Some(path_entry) = path_entry else {
+        return Ok(());
+    };
+    let (key_name, root, subkey) = if path_entry.system {
+        (
+            String::from("HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"),
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+        )
+    } else {
+        (String::from("HKCU\\Environment"), RegKey::predef(HKEY_CURRENT_USER), "Environment")
+    };
+
+    let (env_key, _) = root.create_subkey(subkey).map_err(|source| EngineError::RegistryIo {
+        key: key_name.clone(),
+        value_name: String::from("Path"),
+        source,
+    })?;
+    let current = match env_key.get_value::<String, _>("Path") {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(EngineError::RegistryIo {
+                key: key_name.clone(),
+                value_name: String::from("Path"),
+                source,
+            });
+        }
+    };
+    let updated = remove_path_entry(&current, &path_entry.entry);
+    if updated == current {
+        return Ok(());
+    }
+    env_key
+        .set_raw_value(
+            "Path",
+            &RegValue {
+                bytes: encode_utf16_nul(&updated),
+                vtype: REG_EXPAND_SZ,
+            },
+        )
+        .map_err(|source| EngineError::RegistryIo {
+            key: key_name,
+            value_name: String::from("Path"),
+            source,
+        })?;
+    broadcast_environment_change()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn schedule_self_delete(_current_exe: &Path, _state_path: &Path, _state_dir: &Path) -> Result<(), EngineError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn schedule_self_delete(current_exe: &Path, state_path: &Path, state_dir: &Path) -> Result<(), EngineError> {
+    let command = format!(
+        "ping 127.0.0.1 -n 2 > nul & del /f /q \"{}\" & del /f /q \"{}\" & rmdir /s /q \"{}\"",
+        state_path.display(),
+        current_exe.display(),
+        state_dir.display(),
+    );
+    Command::new("cmd")
+        .args(["/C", &command])
+        .spawn()
+        .map_err(|source| EngineError::LaunchCommand {
+            program: String::from("cmd"),
+            source,
+        })?;
+    Ok(())
 }
 
 #[cfg(windows)]

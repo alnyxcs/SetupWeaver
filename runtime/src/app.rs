@@ -10,6 +10,7 @@ use crate::{engine::InstallerEngine, ui};
 struct Cli {
     print_manifest: bool,
     silent: bool,
+    uninstall: bool,
     install_dir: Option<PathBuf>,
 }
 
@@ -19,6 +20,11 @@ pub fn run() -> Result<()> {
 
     if cli.print_manifest {
         println!("{:#?}", engine.manifest());
+        return Ok(());
+    }
+
+    if cli.uninstall {
+        engine.uninstall(cli.install_dir.as_deref())?;
         return Ok(());
     }
 
@@ -41,6 +47,7 @@ fn parse_cli() -> Result<Cli> {
         match arg.to_string_lossy().as_ref() {
             "--print-manifest" => cli.print_manifest = true,
             "--silent" => cli.silent = true,
+            "--uninstall" => cli.uninstall = true,
             "--install-dir" => {
                 let value = args.next().ok_or_else(|| anyhow::anyhow!("--install-dir requires a value"))?;
                 cli.install_dir = Some(PathBuf::from(value));
@@ -67,9 +74,11 @@ fn print_help(program: &OsString) {
             "SetupWeaver runtime stub\n\n",
             "Usage:\n",
             "  {program} [--silent] [--install-dir <path>]\n",
+            "  {program} --uninstall [--install-dir <path>]\n",
             "  {program} --print-manifest\n\n",
             "Options:\n",
             "  --silent            Install without showing the Slint UI\n",
+            "  --uninstall         Remove an existing installation\n",
             "  --install-dir PATH  Override the default install directory\n",
             "  --print-manifest    Print embedded manifest data and exit\n",
             "  -h, --help          Show this help\n",

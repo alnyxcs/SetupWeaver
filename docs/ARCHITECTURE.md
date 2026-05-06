@@ -36,6 +36,7 @@ runtime
   - validate payload header
   - parse manifest directly from mmap
   - extract files
+  - write install state + uninstall helper
   - write registry
   - mutate PATH
   - create desktop shortcuts
@@ -96,9 +97,11 @@ runtime::payload
 
 runtime::engine
   - InstallerEngine::install()
+  - InstallerEngine::uninstall()
   - parallel silent extraction across files and chunks
   - progress-aware GUI extraction
-  - best-effort rollback of newly created files/shortcuts
+  - rollback of newly created files/shortcuts and in-session registry/PATH edits
+  - install state persistence
   - token expansion
   - registry writes
   - PATH mutation
@@ -147,12 +150,13 @@ Indexed manifest + chunked zstd frames.
 ### Downside
 - packager currently holds compressed frames in memory before writing
 - GUI path stays sequential for stable progress updates
-- rollback is currently best-effort for newly created files/shortcuts, not full transactional restore
+- rollback still does not restore overwritten files from pre-install backups
+- safe in-place upgrades are not enabled yet; current policy is uninstall first
 - slightly worse compression than one giant shared stream on some payloads
 
 ### Recommendation
 Keep this as the default v2 payload.
-Next perf step: stream payload assembly directly to the final output to cut peak RAM during packaging.
+Next hardening step: enable safe managed upgrades backed by pre-install file backups and state-aware cleanup.
 
 ## Binary size note
 
