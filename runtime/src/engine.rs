@@ -282,12 +282,14 @@ impl InstallerEngine {
             source,
         })?;
         let mut writer = BufWriter::with_capacity(1024 * 1024, file);
-        let compressed = self.payload.payload_file_bytes(packaged)?;
-        let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(compressed))?;
-        std::io::copy(&mut decoder, &mut writer).map_err(|source| EngineError::WriteFile {
-            path: output_path.to_path_buf(),
-            source,
-        })?;
+        for (chunk_index, chunk) in packaged.chunks.iter().enumerate() {
+            let compressed = self.payload.payload_chunk_bytes(packaged, chunk, chunk_index)?;
+            let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(compressed))?;
+            std::io::copy(&mut decoder, &mut writer).map_err(|source| EngineError::WriteFile {
+                path: output_path.to_path_buf(),
+                source,
+            })?;
+        }
         Ok(())
     }
 

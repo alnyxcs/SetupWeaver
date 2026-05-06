@@ -1,11 +1,14 @@
 // packager/src/builder.rs
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use setupweaver_common::{InstallConfig, PackagedFile, PackagedInstaller, PAYLOAD_HEADER_SIZE, PAYLOAD_MAGIC};
+use setupweaver_common::{
+    InstallConfig, PackagedChunk, PackagedFile, PackagedInstaller, PAYLOAD_CHUNK_SIZE, PAYLOAD_HEADER_SIZE, PAYLOAD_MAGIC,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -83,7 +86,7 @@ pub fn build_installer(
     let bar = ProgressBar::new_spinner();
     bar.set_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
     bar.enable_steady_tick(std::time::Duration::from_millis(80));
-    bar.set_message("compressing payload frames");
+    bar.set_message("compressing payload chunks");
 
     let compressed_files = compress_payload_files(&payload)?;
     let manifest = build_manifest(config, license_text, &payload, &compressed_files);
@@ -130,7 +133,12 @@ struct PayloadSourceFile {
 }
 
 struct CompressedPayloadFile {
+    chunks: Vec<CompressedPayloadChunk>,
+}
+
+struct CompressedPayloadChunk {
     compressed_bytes: Vec<u8>,
+    uncompressed_size: u64,
 }
 
 fn load_license_text(base_dir: &Path, license_file: Option<&str>) -> Result<Option<String>, PackagerError> {
@@ -186,12 +194,31 @@ fn compress_payload_files(files: &[PayloadSourceFile]) -> Result<Vec<CompressedP
     files
         .par_iter()
         .map(|file| {
-            let bytes = fs::read(&file.source_path).map_err(|source| PackagerError::ReadInputFile {
+            let input = fs::File::open(&file.source_path).map_err(|source| PackagerError::ReadInputFile {
                 path: file.source_path.clone(),
                 source,
             })?;
-            let compressed_bytes = zstd::stream::encode_all(std::io::Cursor::new(bytes), 19)?;
-            Ok(CompressedPayloadFile { compressed_bytes })
+            let mut reader = BufReader::with_capacity(PAYLOAD_CHUNK_SIZE, input);
+            let mut buffer = vec![0u8; PAYLOAD_CHUNK_SIZE];
+            let mut chunks = Vec::new();
+
+            loop {
+                let read = reader.read(&mut buffer).map_err(|source| PackagerError::ReadInputFile {
+                    path: file.source_path.clone(),
+                    source,
+                })?;
+                if read == 0 {
+                    break;
+                }
+
+                let compressed_bytes = zstd::stream::encode_all(std::io::Cursor::new(&buffer[..read]), 19)?;
+                chunks.push(CompressedPayloadChunk {
+                    compressed_bytes,
+                    uncompressed_size: read as u64,
+                });
+            }
+
+            Ok(CompressedPayloadFile { chunks })
         })
         .collect()
 }
@@ -207,14 +234,25 @@ fn build_manifest(
         .iter()
         .zip(compressed_files.iter())
         .map(|(file, compressed)| {
-            let packaged = PackagedFile {
-                payload_offset: next_offset,
-                compressed_size: compressed.compressed_bytes.len() as u64,
+            let chunks = compressed
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    let packaged = PackagedChunk {
+                        payload_offset: next_offset,
+                        compressed_size: chunk.compressed_bytes.len() as u64,
+                        uncompressed_size: chunk.uncompressed_size,
+                    };
+                    next_offset += packaged.compressed_size;
+                    packaged
+                })
+                .collect();
+
+            PackagedFile {
                 destination: file.destination.clone(),
                 size: file.size,
-            };
-            next_offset += packaged.compressed_size;
-            packaged
+                chunks,
+            }
         })
         .collect();
 
@@ -232,14 +270,20 @@ fn build_payload_bytes(
     let manifest_bytes = toml::to_string_pretty(manifest).expect("manifest serialization must succeed");
     let payload_capacity = PAYLOAD_HEADER_SIZE
         + manifest_bytes.len()
-        + compressed_files.iter().map(|file| file.compressed_bytes.len()).sum::<usize>();
+        + compressed_files
+            .iter()
+            .flat_map(|file| file.chunks.iter())
+            .map(|chunk| chunk.compressed_bytes.len())
+            .sum::<usize>();
 
     let mut payload = Vec::with_capacity(payload_capacity);
     payload.extend_from_slice(&PAYLOAD_MAGIC);
     payload.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
     payload.extend_from_slice(manifest_bytes.as_bytes());
     for file in compressed_files {
-        payload.extend_from_slice(&file.compressed_bytes);
+        for chunk in &file.chunks {
+            payload.extend_from_slice(&chunk.compressed_bytes);
+        }
     }
     Ok(payload)
 }
@@ -318,5 +362,15 @@ fn glob_root(base_dir: &Path, pattern: &str) -> PathBuf {
         } else {
             candidate
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PAYLOAD_CHUNK_SIZE;
+
+    #[test]
+    fn chunk_constant_is_large_enough_for_good_throughput() {
+        assert!(PAYLOAD_CHUNK_SIZE >= 1024 * 1024);
     }
 }

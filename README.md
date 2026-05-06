@@ -33,7 +33,7 @@ Implemented:
 
 - TOML parsing + validation
 - trailer-based single-file payload format
-- indexed payload manifest + per-file zstd frames
+- indexed payload manifest + chunked zstd frames
 - runtime payload mmap + zero-copy manifest loading
 - file extraction
 - registry writes
@@ -51,6 +51,7 @@ Known issue:
 - release `packager.exe` fits target well
 - release `runtime.exe` is down to roughly `7.2 MB` here, but still above the long-term `< 3 MB` target with the current Slint+winit software-renderer stack
 - GUI installs keep sequential extraction for smooth progress reporting; silent installs use the fast path
+- chunked payload frames are in place, but large single files are not yet decompressed in parallel within one file
 
 ## Build
 
@@ -133,5 +134,5 @@ exclude = ["*.pdb"]
 ## Short roadmap
 
 - reduce runtime stub size further
-- chunk very large files into multiple frames for intra-file parallel extraction
+- true intra-file parallel extraction for large single files
 - transactional rollback for overwritten files / registry / PATH

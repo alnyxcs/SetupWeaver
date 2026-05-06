@@ -22,7 +22,7 @@ packager
   - expand globs
   - inline license text
   - select user/admin runtime stub
-  - compress each file into its own zstd frame
+  - compress files into chunked zstd frames
   - build indexed manifest
   - append 8-byte offset trailer
     |
@@ -49,18 +49,25 @@ payload =
   [8-byte magic]
   [u64 manifest_len]
   [manifest.toml]
-  [zstd frame for file 0]
-  [zstd frame for file 1]
+  [zstd frame for chunk 0]
+  [zstd frame for chunk 1]
   ...
 ```
 
 Each `PackagedFile` stores:
 
 ```text
+destination
+size
+chunks[]
+```
+
+Each chunk stores:
+
+```text
 payload_offset   # relative to first compressed frame
 compressed_size
-size
-destination
+uncompressed_size
 ```
 
 ## Module boundaries
@@ -128,23 +135,25 @@ Welcome -> License? -> Install -> Finish
 ## Current trade-off
 
 ### Option
-Indexed manifest + per-file zstd frames.
+Indexed manifest + chunked zstd frames.
 
 ### Upside
 - manifest loads directly from mmap
 - silent installs can extract files in parallel with rayon
+- large files are already chunk-addressable for future intra-file parallelism
 - true random access to individual files
 - still one-file output
 
 ### Downside
 - packager currently holds compressed frames in memory before writing
 - GUI path stays sequential for stable progress updates
+- large single files are still written chunk-by-chunk on one thread today
 - rollback is currently best-effort for newly created files/shortcuts, not full transactional restore
 - slightly worse compression than one giant shared stream on some payloads
 
 ### Recommendation
 Keep this as the default v2 payload.
-Next perf step: chunk very large files into multiple frames to unlock intra-file parallel extraction.
+Next perf step: parallelize decode/write across chunks of one large file.
 
 ## Binary size note
 

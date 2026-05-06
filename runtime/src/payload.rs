@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
-use setupweaver_common::{PackagedFile, PackagedInstaller, PAYLOAD_HEADER_SIZE, PAYLOAD_MAGIC};
+use setupweaver_common::{PackagedChunk, PackagedFile, PackagedInstaller, PAYLOAD_HEADER_SIZE, PAYLOAD_MAGIC};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,8 +33,8 @@ pub enum PayloadError {
     InvalidManifestLength { manifest_len: u64, payload_len: usize },
     #[error("failed to parse packaged manifest: {0}")]
     ManifestParse(#[from] toml::de::Error),
-    #[error("payload slice for {destination} is outside the embedded payload")]
-    FileOutOfBounds { destination: String },
+    #[error("payload slice for {destination} chunk {chunk_index} is outside the embedded payload")]
+    ChunkOutOfBounds { destination: String, chunk_index: usize },
 }
 
 pub struct EmbeddedPayload {
@@ -94,23 +94,31 @@ impl EmbeddedPayload {
         Ok(toml::from_str(std::str::from_utf8(&self.payload_bytes()[manifest_range]).map_err(|_| PayloadError::InvalidHeader)?)?)
     }
 
-    pub fn payload_file_bytes(&self, file: &PackagedFile) -> Result<&[u8], PayloadError> {
+    pub fn payload_chunk_bytes(
+        &self,
+        file: &PackagedFile,
+        chunk: &PackagedChunk,
+        chunk_index: usize,
+    ) -> Result<&[u8], PayloadError> {
         let payload = self.payload_bytes();
         let data_start = self.data_start()?;
         let start = data_start
-            .checked_add(file.payload_offset as usize)
-            .ok_or_else(|| PayloadError::FileOutOfBounds {
+            .checked_add(chunk.payload_offset as usize)
+            .ok_or_else(|| PayloadError::ChunkOutOfBounds {
                 destination: file.destination.clone(),
+                chunk_index,
             })?;
         let end = start
-            .checked_add(file.compressed_size as usize)
-            .ok_or_else(|| PayloadError::FileOutOfBounds {
+            .checked_add(chunk.compressed_size as usize)
+            .ok_or_else(|| PayloadError::ChunkOutOfBounds {
                 destination: file.destination.clone(),
+                chunk_index,
             })?;
 
         if end > payload.len() {
-            return Err(PayloadError::FileOutOfBounds {
+            return Err(PayloadError::ChunkOutOfBounds {
                 destination: file.destination.clone(),
+                chunk_index,
             });
         }
 
