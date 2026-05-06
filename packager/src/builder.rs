@@ -1,12 +1,11 @@
 // packager/src/builder.rs
 use std::collections::HashSet;
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use indicatif::{ProgressBar, ProgressStyle};
-use setupweaver_common::{InstallConfig, PackagedFile, PackagedInstaller, PACKAGED_MANIFEST_PATH};
-use tar::{Builder as TarBuilder, Header};
+use rayon::prelude::*;
+use setupweaver_common::{InstallConfig, PackagedFile, PackagedInstaller, PAYLOAD_HEADER_SIZE, PAYLOAD_MAGIC};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -57,8 +56,8 @@ pub enum PackagerError {
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to build tar payload: {0}")]
-    Tar(#[from] std::io::Error),
+    #[error("failed to build payload: {0}")]
+    PayloadBuild(#[from] std::io::Error),
 }
 
 pub fn build_installer(
@@ -81,18 +80,14 @@ pub fn build_installer(
     let license_text = load_license_text(base_dir, config.ui.license_file.as_deref())?;
     let payload = collect_payload(&config, base_dir)?;
 
-    let manifest = PackagedInstaller {
-        config,
-        license_text,
-        payload: payload.iter().map(|file| file.manifest.clone()).collect(),
-    };
-
     let bar = ProgressBar::new_spinner();
     bar.set_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
     bar.enable_steady_tick(std::time::Duration::from_millis(80));
-    bar.set_message("packing payload");
+    bar.set_message("compressing payload frames");
 
-    let compressed = build_compressed_archive(&manifest, &payload)?;
+    let compressed_files = compress_payload_files(&payload)?;
+    let manifest = build_manifest(config, license_text, &payload, &compressed_files);
+    let payload_bytes = build_payload_bytes(&manifest, &compressed_files)?;
 
     bar.set_message("writing setup.exe");
 
@@ -108,9 +103,9 @@ pub fn build_installer(
     })?;
 
     let archive_offset = stub.len() as u64;
-    let mut output = Vec::with_capacity(stub.len() + compressed.len() + 8);
+    let mut output = Vec::with_capacity(stub.len() + payload_bytes.len() + 8);
     output.extend_from_slice(&stub);
-    output.extend_from_slice(&compressed);
+    output.extend_from_slice(&payload_bytes);
     output.extend_from_slice(&archive_offset.to_le_bytes());
 
     fs::write(output_path, output).map_err(|source| PackagerError::WriteOutput {
@@ -119,9 +114,9 @@ pub fn build_installer(
     })?;
 
     bar.finish_with_message(format!(
-        "built {} (payload: {:.2} MiB compressed)",
+        "built {} (payload: {:.2} MiB)",
         output_path.display(),
-        compressed.len() as f64 / (1024.0 * 1024.0)
+        payload_bytes.len() as f64 / (1024.0 * 1024.0)
     ));
 
     Ok(())
@@ -130,7 +125,12 @@ pub fn build_installer(
 #[derive(Debug, Clone)]
 struct PayloadSourceFile {
     source_path: PathBuf,
-    manifest: PackagedFile,
+    destination: String,
+    size: u64,
+}
+
+struct CompressedPayloadFile {
+    compressed_bytes: Vec<u8>,
 }
 
 fn load_license_text(base_dir: &Path, license_file: Option<&str>) -> Result<Option<String>, PackagerError> {
@@ -160,7 +160,6 @@ fn collect_payload(config: &InstallConfig, base_dir: &Path) -> Result<Vec<Payloa
         for matched_path in matches {
             let relative = relative_entry_path(&root, &matched_path)?;
             let destination = join_destination(&spec.dest, &relative);
-            let archive_path = format!("files/{}", files.len());
             let size = fs::metadata(&matched_path)
                 .map_err(|source| PackagerError::WalkFile {
                     path: matched_path.clone(),
@@ -174,16 +173,75 @@ fn collect_payload(config: &InstallConfig, base_dir: &Path) -> Result<Vec<Payloa
 
             files.push(PayloadSourceFile {
                 source_path: matched_path,
-                manifest: PackagedFile {
-                    archive_path,
-                    destination,
-                    size,
-                },
+                destination,
+                size,
             });
         }
     }
 
     Ok(files)
+}
+
+fn compress_payload_files(files: &[PayloadSourceFile]) -> Result<Vec<CompressedPayloadFile>, PackagerError> {
+    files
+        .par_iter()
+        .map(|file| {
+            let bytes = fs::read(&file.source_path).map_err(|source| PackagerError::ReadInputFile {
+                path: file.source_path.clone(),
+                source,
+            })?;
+            let compressed_bytes = zstd::stream::encode_all(std::io::Cursor::new(bytes), 19)?;
+            Ok(CompressedPayloadFile { compressed_bytes })
+        })
+        .collect()
+}
+
+fn build_manifest(
+    config: InstallConfig,
+    license_text: Option<String>,
+    files: &[PayloadSourceFile],
+    compressed_files: &[CompressedPayloadFile],
+) -> PackagedInstaller {
+    let mut next_offset = 0u64;
+    let payload = files
+        .iter()
+        .zip(compressed_files.iter())
+        .map(|(file, compressed)| {
+            let packaged = PackagedFile {
+                payload_offset: next_offset,
+                compressed_size: compressed.compressed_bytes.len() as u64,
+                destination: file.destination.clone(),
+                size: file.size,
+            };
+            next_offset += packaged.compressed_size;
+            packaged
+        })
+        .collect();
+
+    PackagedInstaller {
+        config,
+        license_text,
+        payload,
+    }
+}
+
+fn build_payload_bytes(
+    manifest: &PackagedInstaller,
+    compressed_files: &[CompressedPayloadFile],
+) -> Result<Vec<u8>, PackagerError> {
+    let manifest_bytes = toml::to_string_pretty(manifest).expect("manifest serialization must succeed");
+    let payload_capacity = PAYLOAD_HEADER_SIZE
+        + manifest_bytes.len()
+        + compressed_files.iter().map(|file| file.compressed_bytes.len()).sum::<usize>();
+
+    let mut payload = Vec::with_capacity(payload_capacity);
+    payload.extend_from_slice(&PAYLOAD_MAGIC);
+    payload.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(manifest_bytes.as_bytes());
+    for file in compressed_files {
+        payload.extend_from_slice(&file.compressed_bytes);
+    }
+    Ok(payload)
 }
 
 fn expand_matches(base_dir: &Path, pattern: &str, excludes: &[String]) -> Result<Vec<PathBuf>, PackagerError> {
@@ -211,37 +269,6 @@ fn expand_matches(base_dir: &Path, pattern: &str, excludes: &[String]) -> Result
 
     results.sort();
     Ok(results)
-}
-
-fn build_compressed_archive(manifest: &PackagedInstaller, files: &[PayloadSourceFile]) -> Result<Vec<u8>, PackagerError> {
-    let mut encoder = zstd::Encoder::new(Vec::new(), 19)?;
-
-    {
-        let mut tar = TarBuilder::new(&mut encoder);
-        let manifest_bytes = toml::to_string_pretty(manifest).expect("manifest serialization must succeed");
-        append_bytes(&mut tar, PACKAGED_MANIFEST_PATH, manifest_bytes.as_bytes())?;
-
-        for file in files {
-            let bytes = fs::read(&file.source_path).map_err(|source| PackagerError::ReadInputFile {
-                path: file.source_path.clone(),
-                source,
-            })?;
-            append_bytes(&mut tar, &file.manifest.archive_path, &bytes)?;
-        }
-
-        tar.finish()?;
-    }
-
-    Ok(encoder.finish()?)
-}
-
-fn append_bytes<W: std::io::Write>(tar: &mut TarBuilder<W>, path: &str, bytes: &[u8]) -> Result<(), std::io::Error> {
-    let mut header = Header::new_gnu();
-    header.set_size(bytes.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    tar.append_data(&mut header, path, Cursor::new(bytes))?;
-    Ok(())
 }
 
 fn relative_entry_path(root: &Path, path: &Path) -> Result<PathBuf, PackagerError> {

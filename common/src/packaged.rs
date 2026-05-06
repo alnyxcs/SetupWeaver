@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::InstallConfig;
 
-pub const PACKAGED_MANIFEST_PATH: &str = ".setupweaver/manifest.toml";
+pub const PAYLOAD_MAGIC: [u8; 8] = *b"SWPAYLD2";
+pub const PAYLOAD_HEADER_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagedInstaller {
@@ -15,7 +16,8 @@ pub struct PackagedInstaller {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagedFile {
-    pub archive_path: String,
+    pub payload_offset: u64,
+    pub compressed_size: u64,
     pub destination: String,
     pub size: u64,
 }

@@ -1,13 +1,12 @@
 // runtime/src/engine.rs
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use setupweaver_common::{PackagedInstaller, RunWhen, ShortcutSpec};
-use tar::Archive;
+use rayon::prelude::*;
+use setupweaver_common::{PackagedFile, PackagedInstaller, RunWhen, ShortcutSpec};
 use thiserror::Error;
 
 use crate::payload::{EmbeddedPayload, PayloadError};
@@ -78,8 +77,6 @@ pub enum EngineError {
         #[source]
         source: std::io::Error,
     },
-    #[error("archive entry {0} is missing from packaged manifest")]
-    UnknownArchiveEntry(String),
     #[error("failed to resolve path template {template}: {reason}")]
     ResolvePath { template: String, reason: String },
     #[error("failed to launch post-install command {program}: {source}")]
@@ -140,7 +137,9 @@ impl InstallerEngine {
     }
 
     pub fn install(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
-        self.install_with_progress(install_dir, |_| {})
+        let context = InstallContext::for_manifest(&self.manifest, install_dir)?;
+        self.extract_files_parallel(&context)?;
+        self.configure_system(&context)
     }
 
     pub fn install_with_progress<F>(&self, install_dir: Option<&Path>, mut progress: F) -> Result<(), EngineError>
@@ -162,57 +161,8 @@ impl InstallerEngine {
             total_bytes,
         ));
 
-        let (completed_files, completed_bytes) = self.extract_files(&context, &mut progress, total_files, total_bytes)?;
-
-        progress(InstallProgress::new(
-            InstallPhase::Configuring,
-            0.90,
-            "Writing registry entries",
-            self.manifest.config.app.name.clone(),
-            completed_files,
-            total_files,
-            completed_bytes,
-            total_bytes,
-        ));
-        self.apply_registry(&context)?;
-
-        progress(InstallProgress::new(
-            InstallPhase::Configuring,
-            0.94,
-            "Updating PATH",
-            context.install_dir.display().to_string(),
-            completed_files,
-            total_files,
-            completed_bytes,
-            total_bytes,
-        ));
-        self.update_path(&context)?;
-
-        progress(InstallProgress::new(
-            InstallPhase::Configuring,
-            0.97,
-            "Creating shortcuts",
-            context.desktop.display().to_string(),
-            completed_files,
-            total_files,
-            completed_bytes,
-            total_bytes,
-        ));
-        self.create_shortcuts(&context)?;
-
-        progress(InstallProgress::new(
-            InstallPhase::Finishing,
-            0.99,
-            "Starting post-install tasks",
-            self.manifest.config.app.name.clone(),
-            completed_files,
-            total_files,
-            completed_bytes,
-            total_bytes,
-        ));
-        self.run_hooks(&context, RunWhen::After)?;
-
-        Ok(())
+        let (completed_files, completed_bytes) = self.extract_files_with_progress(&context, &mut progress, total_files, total_bytes)?;
+        self.configure_system_with_progress(&context, &mut progress, completed_files, completed_bytes, total_files, total_bytes)
     }
 
     pub fn finish(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
@@ -220,36 +170,27 @@ impl InstallerEngine {
         self.run_hooks(&context, RunWhen::Finish)
     }
 
-    fn extract_files(
+    fn extract_files_parallel(&self, context: &InstallContext) -> Result<(), EngineError> {
+        self.manifest
+            .payload
+            .par_iter()
+            .try_for_each(|packaged| {
+                let output_path = resolve_template(&packaged.destination, context)?;
+                self.write_payload_file(packaged, &output_path)
+            })
+    }
+
+    fn extract_files_with_progress(
         &self,
         context: &InstallContext,
         progress: &mut dyn FnMut(InstallProgress),
         total_files: usize,
         total_bytes: u64,
     ) -> Result<(usize, u64), EngineError> {
-        let mut archive = Archive::new(zstd::stream::read::Decoder::new(Cursor::new(self.payload.archive_bytes()))?);
-        let manifest_by_archive_path: HashMap<&str, &setupweaver_common::PackagedFile> = self
-            .manifest
-            .payload
-            .iter()
-            .map(|file| (file.archive_path.as_str(), file))
-            .collect();
-
         let mut completed_files = 0usize;
         let mut completed_bytes = 0u64;
 
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let archive_path = entry.path()?.to_string_lossy().into_owned();
-            if archive_path == setupweaver_common::PACKAGED_MANIFEST_PATH {
-                continue;
-            }
-
-            let packaged = manifest_by_archive_path
-                .get(archive_path.as_str())
-                .copied()
-                .ok_or_else(|| EngineError::UnknownArchiveEntry(archive_path.clone()))?;
-
+        for packaged in &self.manifest.payload {
             let output_path = resolve_template(&packaged.destination, context)?;
             progress(InstallProgress::new(
                 InstallPhase::Extracting,
@@ -262,22 +203,7 @@ impl InstallerEngine {
                 total_bytes,
             ));
 
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(|source| EngineError::CreateDir {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-
-            let file = File::create(&output_path).map_err(|source| EngineError::CreateFile {
-                path: output_path.clone(),
-                source,
-            })?;
-            let mut writer = BufWriter::with_capacity(1024 * 1024, file);
-            std::io::copy(&mut entry, &mut writer).map_err(|source| EngineError::WriteFile {
-                path: output_path.clone(),
-                source,
-            })?;
+            self.write_payload_file(packaged, &output_path)?;
 
             completed_files += 1;
             completed_bytes = completed_bytes.saturating_add(packaged.size);
@@ -294,6 +220,93 @@ impl InstallerEngine {
         }
 
         Ok((completed_files, completed_bytes))
+    }
+
+    fn write_payload_file(&self, packaged: &PackagedFile, output_path: &Path) -> Result<(), EngineError> {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| EngineError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        let file = File::create(output_path).map_err(|source| EngineError::CreateFile {
+            path: output_path.to_path_buf(),
+            source,
+        })?;
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        let compressed = self.payload.payload_file_bytes(packaged)?;
+        let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(compressed))?;
+        std::io::copy(&mut decoder, &mut writer).map_err(|source| EngineError::WriteFile {
+            path: output_path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn configure_system(&self, context: &InstallContext) -> Result<(), EngineError> {
+        self.apply_registry(context)?;
+        self.update_path(context)?;
+        self.create_shortcuts(context)?;
+        self.run_hooks(context, RunWhen::After)
+    }
+
+    fn configure_system_with_progress(
+        &self,
+        context: &InstallContext,
+        progress: &mut dyn FnMut(InstallProgress),
+        completed_files: usize,
+        completed_bytes: u64,
+        total_files: usize,
+        total_bytes: u64,
+    ) -> Result<(), EngineError> {
+        progress(InstallProgress::new(
+            InstallPhase::Configuring,
+            0.90,
+            "Writing registry entries",
+            self.manifest.config.app.name.clone(),
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        ));
+        self.apply_registry(context)?;
+
+        progress(InstallProgress::new(
+            InstallPhase::Configuring,
+            0.94,
+            "Updating PATH",
+            context.install_dir.display().to_string(),
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        ));
+        self.update_path(context)?;
+
+        progress(InstallProgress::new(
+            InstallPhase::Configuring,
+            0.97,
+            "Creating shortcuts",
+            context.desktop.display().to_string(),
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        ));
+        self.create_shortcuts(context)?;
+
+        progress(InstallProgress::new(
+            InstallPhase::Finishing,
+            0.99,
+            "Starting post-install tasks",
+            self.manifest.config.app.name.clone(),
+            completed_files,
+            total_files,
+            completed_bytes,
+            total_bytes,
+        ));
+        self.run_hooks(context, RunWhen::After)
     }
 
     fn run_hooks(&self, context: &InstallContext, when: RunWhen) -> Result<(), EngineError> {

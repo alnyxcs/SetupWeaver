@@ -1,12 +1,10 @@
 // runtime/src/payload.rs
 use std::fs::File;
-use std::io::{Cursor, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
-use setupweaver_common::{PackagedInstaller, PACKAGED_MANIFEST_PATH};
-use tar::Archive;
+use setupweaver_common::{PackagedFile, PackagedInstaller, PAYLOAD_HEADER_SIZE, PAYLOAD_MAGIC};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -27,18 +25,22 @@ pub enum PayloadError {
     MissingTrailer,
     #[error("payload offset {offset} is outside installer size {file_len}")]
     InvalidOffset { offset: u64, file_len: usize },
-    #[error("failed to read payload archive: {0}")]
-    Archive(#[from] std::io::Error),
+    #[error("payload is smaller than the indexed header")]
+    InvalidHeader,
+    #[error("payload magic is invalid")]
+    InvalidMagic,
+    #[error("manifest length {manifest_len} exceeds payload size {payload_len}")]
+    InvalidManifestLength { manifest_len: u64, payload_len: usize },
     #[error("failed to parse packaged manifest: {0}")]
     ManifestParse(#[from] toml::de::Error),
-    #[error("packaged manifest entry {path} not found")]
-    ManifestMissing { path: &'static str },
+    #[error("payload slice for {destination} is outside the embedded payload")]
+    FileOutOfBounds { destination: String },
 }
 
 pub struct EmbeddedPayload {
     exe_path: PathBuf,
     mmap: Mmap,
-    archive_range: Range<usize>,
+    payload_range: Range<usize>,
 }
 
 impl EmbeddedPayload {
@@ -79,7 +81,7 @@ impl EmbeddedPayload {
         Ok(Self {
             exe_path: path.to_path_buf(),
             mmap,
-            archive_range: offset as usize..offset_index,
+            payload_range: offset as usize..offset_index,
         })
     }
 
@@ -87,24 +89,70 @@ impl EmbeddedPayload {
         &self.exe_path
     }
 
-    pub fn archive_bytes(&self) -> &[u8] {
-        &self.mmap[self.archive_range.clone()]
+    pub fn read_manifest(&self) -> Result<PackagedInstaller, PayloadError> {
+        let manifest_range = self.manifest_range()?;
+        Ok(toml::from_str(std::str::from_utf8(&self.payload_bytes()[manifest_range]).map_err(|_| PayloadError::InvalidHeader)?)?)
     }
 
-    pub fn read_manifest(&self) -> Result<PackagedInstaller, PayloadError> {
-        let mut archive = Archive::new(zstd::stream::read::Decoder::new(Cursor::new(self.archive_bytes()))?);
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?;
-            if path.to_string_lossy() == PACKAGED_MANIFEST_PATH {
-                let mut manifest = String::new();
-                entry.read_to_string(&mut manifest)?;
-                return Ok(toml::from_str(&manifest)?);
-            }
+    pub fn payload_file_bytes(&self, file: &PackagedFile) -> Result<&[u8], PayloadError> {
+        let payload = self.payload_bytes();
+        let data_start = self.data_start()?;
+        let start = data_start
+            .checked_add(file.payload_offset as usize)
+            .ok_or_else(|| PayloadError::FileOutOfBounds {
+                destination: file.destination.clone(),
+            })?;
+        let end = start
+            .checked_add(file.compressed_size as usize)
+            .ok_or_else(|| PayloadError::FileOutOfBounds {
+                destination: file.destination.clone(),
+            })?;
+
+        if end > payload.len() {
+            return Err(PayloadError::FileOutOfBounds {
+                destination: file.destination.clone(),
+            });
         }
 
-        Err(PayloadError::ManifestMissing {
-            path: PACKAGED_MANIFEST_PATH,
-        })
+        Ok(&payload[start..end])
+    }
+
+    fn payload_bytes(&self) -> &[u8] {
+        &self.mmap[self.payload_range.clone()]
+    }
+
+    fn manifest_range(&self) -> Result<Range<usize>, PayloadError> {
+        let payload = self.payload_bytes();
+        if payload.len() < PAYLOAD_HEADER_SIZE {
+            return Err(PayloadError::InvalidHeader);
+        }
+        if payload[..PAYLOAD_MAGIC.len()] != PAYLOAD_MAGIC {
+            return Err(PayloadError::InvalidMagic);
+        }
+
+        let manifest_len = u64::from_le_bytes(
+            payload[PAYLOAD_MAGIC.len()..PAYLOAD_HEADER_SIZE]
+                .try_into()
+                .expect("slice length is fixed"),
+        );
+        let manifest_end = PAYLOAD_HEADER_SIZE
+            .checked_add(manifest_len as usize)
+            .ok_or(PayloadError::InvalidManifestLength {
+                manifest_len,
+                payload_len: payload.len(),
+            })?;
+
+        if manifest_end > payload.len() {
+            return Err(PayloadError::InvalidManifestLength {
+                manifest_len,
+                payload_len: payload.len(),
+            });
+        }
+
+        Ok(PAYLOAD_HEADER_SIZE..manifest_end)
+    }
+
+    fn data_start(&self) -> Result<usize, PayloadError> {
+        Ok(self.manifest_range()?.end)
     }
 }

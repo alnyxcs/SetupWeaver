@@ -33,8 +33,8 @@ Implemented:
 
 - TOML parsing + validation
 - trailer-based single-file payload format
-- zstd-compressed tar payload
-- runtime payload mmap + manifest loading
+- indexed payload manifest + per-file zstd frames
+- runtime payload mmap + zero-copy manifest loading
 - file extraction
 - registry writes
 - PATH mutation
@@ -48,6 +48,7 @@ Known issue:
 
 - release `packager.exe` fits target well
 - release `runtime.exe` is still above the long-term `< 3 MB` target with current Slint+winit software-renderer stack
+- GUI installs keep sequential extraction for smooth progress reporting; silent installs use the fast path
 
 ## Build
 
