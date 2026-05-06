@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -138,8 +139,13 @@ impl InstallerEngine {
 
     pub fn install(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
         let context = InstallContext::for_manifest(&self.manifest, install_dir)?;
-        self.extract_files_parallel(&context)?;
-        self.configure_system(&context)
+        let plans = self.build_extract_plans(&context)?;
+        let mut rollback = self.extract_files_parallel(&plans)?;
+        if let Err(error) = self.configure_system(&context, &mut rollback) {
+            rollback.rollback();
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn install_with_progress<F>(&self, install_dir: Option<&Path>, mut progress: F) -> Result<(), EngineError>
@@ -147,6 +153,7 @@ impl InstallerEngine {
         F: FnMut(InstallProgress),
     {
         let context = InstallContext::for_manifest(&self.manifest, install_dir)?;
+        let plans = self.build_extract_plans(&context)?;
         let total_files = self.manifest.payload.len();
         let total_bytes = self.manifest.payload.iter().map(|file| file.size).sum();
 
@@ -161,8 +168,21 @@ impl InstallerEngine {
             total_bytes,
         ));
 
-        let (completed_files, completed_bytes) = self.extract_files_with_progress(&context, &mut progress, total_files, total_bytes)?;
-        self.configure_system_with_progress(&context, &mut progress, completed_files, completed_bytes, total_files, total_bytes)
+        let (mut rollback, completed_files, completed_bytes) =
+            self.extract_files_with_progress(&plans, &mut progress, total_files, total_bytes)?;
+        if let Err(error) = self.configure_system_with_progress(
+            &context,
+            &mut progress,
+            &mut rollback,
+            completed_files,
+            completed_bytes,
+            total_files,
+            total_bytes,
+        ) {
+            rollback.rollback();
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn finish(&self, install_dir: Option<&Path>) -> Result<(), EngineError> {
@@ -170,48 +190,75 @@ impl InstallerEngine {
         self.run_hooks(&context, RunWhen::Finish)
     }
 
-    fn extract_files_parallel(&self, context: &InstallContext) -> Result<(), EngineError> {
+    fn build_extract_plans(&self, context: &InstallContext) -> Result<Vec<ExtractPlan>, EngineError> {
         self.manifest
             .payload
-            .par_iter()
-            .try_for_each(|packaged| {
+            .iter()
+            .map(|packaged| {
                 let output_path = resolve_template(&packaged.destination, context)?;
-                self.write_payload_file(packaged, &output_path)
+                Ok(ExtractPlan {
+                    packaged: packaged.clone(),
+                    output_path: output_path.clone(),
+                    file_existed: output_path.exists(),
+                    created_dirs: missing_parent_dirs(output_path.parent()),
+                })
             })
+            .collect()
+    }
+
+    fn extract_files_parallel(&self, plans: &[ExtractPlan]) -> Result<InstallRollback, EngineError> {
+        let rollback = Mutex::new(InstallRollback::default());
+        let result = plans.par_iter().try_for_each(|plan| {
+            self.write_payload_file(&plan.packaged, &plan.output_path)?;
+            rollback.lock().expect("rollback mutex poisoned").record_extraction(plan);
+            Ok(())
+        });
+
+        let rollback = rollback.into_inner().expect("rollback mutex poisoned");
+        if let Err(error) = result {
+            rollback.rollback();
+            return Err(error);
+        }
+
+        Ok(rollback)
     }
 
     fn extract_files_with_progress(
         &self,
-        context: &InstallContext,
+        plans: &[ExtractPlan],
         progress: &mut dyn FnMut(InstallProgress),
         total_files: usize,
         total_bytes: u64,
-    ) -> Result<(usize, u64), EngineError> {
+    ) -> Result<(InstallRollback, usize, u64), EngineError> {
+        let mut rollback = InstallRollback::default();
         let mut completed_files = 0usize;
         let mut completed_bytes = 0u64;
 
-        for packaged in &self.manifest.payload {
-            let output_path = resolve_template(&packaged.destination, context)?;
+        for plan in plans {
             progress(InstallProgress::new(
                 InstallPhase::Extracting,
                 extraction_progress(completed_bytes, total_bytes),
-                format!("Extracting {}", file_label(&output_path)),
-                output_path.display().to_string(),
+                format!("Extracting {}", file_label(&plan.output_path)),
+                plan.output_path.display().to_string(),
                 completed_files,
                 total_files,
                 completed_bytes,
                 total_bytes,
             ));
 
-            self.write_payload_file(packaged, &output_path)?;
+            if let Err(error) = self.write_payload_file(&plan.packaged, &plan.output_path) {
+                rollback.rollback();
+                return Err(error);
+            }
+            rollback.record_extraction(plan);
 
             completed_files += 1;
-            completed_bytes = completed_bytes.saturating_add(packaged.size);
+            completed_bytes = completed_bytes.saturating_add(plan.packaged.size);
             progress(InstallProgress::new(
                 InstallPhase::Extracting,
                 extraction_progress(completed_bytes, total_bytes),
-                format!("Installed {}", file_label(&output_path)),
-                output_path.display().to_string(),
+                format!("Installed {}", file_label(&plan.output_path)),
+                plan.output_path.display().to_string(),
                 completed_files,
                 total_files,
                 completed_bytes,
@@ -219,7 +266,7 @@ impl InstallerEngine {
             ));
         }
 
-        Ok((completed_files, completed_bytes))
+        Ok((rollback, completed_files, completed_bytes))
     }
 
     fn write_payload_file(&self, packaged: &PackagedFile, output_path: &Path) -> Result<(), EngineError> {
@@ -244,10 +291,10 @@ impl InstallerEngine {
         Ok(())
     }
 
-    fn configure_system(&self, context: &InstallContext) -> Result<(), EngineError> {
+    fn configure_system(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<(), EngineError> {
         self.apply_registry(context)?;
         self.update_path(context)?;
-        self.create_shortcuts(context)?;
+        self.create_shortcuts(context, rollback)?;
         self.run_hooks(context, RunWhen::After)
     }
 
@@ -255,6 +302,7 @@ impl InstallerEngine {
         &self,
         context: &InstallContext,
         progress: &mut dyn FnMut(InstallProgress),
+        rollback: &mut InstallRollback,
         completed_files: usize,
         completed_bytes: u64,
         total_files: usize,
@@ -294,7 +342,7 @@ impl InstallerEngine {
             completed_bytes,
             total_bytes,
         ));
-        self.create_shortcuts(context)?;
+        self.create_shortcuts(context, rollback)?;
 
         progress(InstallProgress::new(
             InstallPhase::Finishing,
@@ -462,12 +510,12 @@ impl InstallerEngine {
     }
 
     #[cfg(not(windows))]
-    fn create_shortcuts(&self, _context: &InstallContext) -> Result<(), EngineError> {
+    fn create_shortcuts(&self, _context: &InstallContext, _rollback: &mut InstallRollback) -> Result<(), EngineError> {
         Ok(())
     }
 
     #[cfg(windows)]
-    fn create_shortcuts(&self, context: &InstallContext) -> Result<(), EngineError> {
+    fn create_shortcuts(&self, context: &InstallContext, rollback: &mut InstallRollback) -> Result<(), EngineError> {
         let mut shortcuts = Vec::new();
 
         if self.manifest.config.shortcuts.is_empty() && self.manifest.config.install.create_desktop_shortcut {
@@ -504,9 +552,61 @@ impl InstallerEngine {
                 &icon,
                 target.parent(),
             )?;
+            rollback.record_shortcut(link_path);
         }
 
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct ExtractPlan {
+    packaged: PackagedFile,
+    output_path: PathBuf,
+    file_existed: bool,
+    created_dirs: Vec<PathBuf>,
+}
+
+#[derive(Default)]
+struct InstallRollback {
+    created_files: Vec<PathBuf>,
+    created_dirs: Vec<PathBuf>,
+    created_shortcuts: Vec<PathBuf>,
+}
+
+impl InstallRollback {
+    fn record_extraction(&mut self, plan: &ExtractPlan) {
+        if !plan.file_existed {
+            self.created_files.push(plan.output_path.clone());
+        }
+        self.created_dirs.extend(plan.created_dirs.iter().cloned());
+    }
+
+    fn record_shortcut(&mut self, path: PathBuf) {
+        self.created_shortcuts.push(path);
+    }
+
+    fn rollback(self) {
+        for path in self.created_shortcuts.into_iter().rev() {
+            let _ = fs::remove_file(path);
+        }
+
+        for path in self.created_files.into_iter().rev() {
+            let _ = fs::remove_file(path);
+        }
+
+        let mut created_dirs = self.created_dirs;
+        created_dirs.sort_by(|left, right| {
+            right
+                .components()
+                .count()
+                .cmp(&left.components().count())
+                .then_with(|| left.cmp(right))
+        });
+        created_dirs.dedup();
+        for path in created_dirs {
+            let _ = fs::remove_dir(&path);
+        }
     }
 }
 
@@ -573,6 +673,21 @@ fn resolve_arg_tokens(input: &str, context: &InstallContext) -> String {
         .replace("{Temp}", &context.temp.display().to_string())
         .replace("{AppName}", &context.app_name)
         .replace("{install_dir}", &context.install_dir.display().to_string())
+}
+
+fn missing_parent_dirs(parent: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = parent;
+
+    while let Some(path) = current {
+        if path.exists() {
+            break;
+        }
+        dirs.push(path.to_path_buf());
+        current = path.parent();
+    }
+
+    dirs
 }
 
 fn parse_windows_args(value: &str) -> Result<Vec<String>, EngineError> {
@@ -826,7 +941,9 @@ fn broadcast_environment_change() -> Result<(), EngineError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_path_entry, normalize_env_path, parse_windows_args};
+    use std::path::Path;
+
+    use super::{append_path_entry, missing_parent_dirs, normalize_env_path, parse_windows_args};
 
     #[test]
     fn appends_missing_path_entry() {
@@ -861,5 +978,11 @@ mod tests {
     fn rejects_unbalanced_quotes() {
         let error = parse_windows_args(r#"--mode "broken"#).unwrap_err();
         assert!(error.to_string().contains("missing closing quote"));
+    }
+
+    #[test]
+    fn no_missing_dirs_when_parent_exists() {
+        let dirs = missing_parent_dirs(Some(Path::new(".")));
+        assert!(dirs.is_empty());
     }
 }

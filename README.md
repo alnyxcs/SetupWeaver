@@ -40,6 +40,7 @@ Implemented:
 - PATH mutation
 - desktop shortcut creation
 - post-install hooks
+- best-effort rollback of newly created files/shortcuts on install failure
 - Slint-based installer wizard
 - `--silent` runtime mode
 - dual runtime stubs for normal/admin installers
@@ -133,4 +134,4 @@ exclude = ["*.pdb"]
 
 - reduce runtime stub size further
 - chunk very large files into multiple frames for intra-file parallel extraction
-- rollback / cleanup on failed installs
+- transactional rollback for overwritten files / registry / PATH

@@ -91,6 +91,7 @@ runtime::engine
   - InstallerEngine::install()
   - parallel silent extraction
   - progress-aware GUI extraction
+  - best-effort rollback of newly created files/shortcuts
   - token expansion
   - registry writes
   - PATH mutation
@@ -138,6 +139,7 @@ Indexed manifest + per-file zstd frames.
 ### Downside
 - packager currently holds compressed frames in memory before writing
 - GUI path stays sequential for stable progress updates
+- rollback is currently best-effort for newly created files/shortcuts, not full transactional restore
 - slightly worse compression than one giant shared stream on some payloads
 
 ### Recommendation
