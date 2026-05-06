@@ -20,12 +20,13 @@ packager
   - parse + validate
   - expand globs
   - inline license text
+  - select user/admin runtime stub
   - build tar payload
   - zstd compress
   - append 8-byte offset trailer
     |
     v
-setup.exe = [runtime stub][payload.zst][u64 offset]
+setup.exe = [selected runtime stub][payload.zst][u64 offset]
     |
     v
 runtime
@@ -73,7 +74,20 @@ runtime::ui
   - worker-thread install orchestration
   - close protection during install
   - progress + error surfaces
+
+runtime-admin
+  - alternate stub package
+  - embeds requireAdministrator manifest
 ```
+
+## UAC strategy
+
+```text
+require_admin = false -> setupweaver-runtime.exe
+require_admin = true  -> setupweaver-runtime-admin.exe
+```
+
+This keeps UAC elevation in an embedded manifest without patching PE resources per package.
 
 ## UI flow
 

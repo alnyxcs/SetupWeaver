@@ -20,6 +20,8 @@ enum Command {
         config: PathBuf,
         #[arg(short, long)]
         stub: PathBuf,
+        #[arg(long)]
+        stub_admin: Option<PathBuf>,
         #[arg(short, long, default_value = "setup.exe")]
         output: PathBuf,
     },
@@ -29,8 +31,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Build { config, stub, output } => {
-            builder::build_installer(&config, &stub, &output)?;
+        Command::Build {
+            config,
+            stub,
+            stub_admin,
+            output,
+        } => {
+            builder::build_installer(&config, &stub, stub_admin.as_deref(), &output)?;
         }
     }
 

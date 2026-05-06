@@ -1,0 +1,27 @@
+[app]
+name = "Hello App"
+version = "1.0.0"
+publisher = "SetupWeaver"
+description = "Tiny demo package with elevation"
+
+[install]
+default_dir = "{ProgramFiles}\\Hello App"
+add_to_path = false
+create_desktop_shortcut = true
+require_admin = true
+
+[ui]
+theme = "system"
+accent_color = "#7c3aed"
+welcome_text = "Welcome to Hello App"
+
+[[files]]
+src = "app/**/*"
+dest = "{install_dir}"
+exclude = ["*.pdb"]
+
+[[shortcuts]]
+name = "Hello App"
+target = "{install_dir}\\HelloApp.exe"
+args = ""
+icon = ""

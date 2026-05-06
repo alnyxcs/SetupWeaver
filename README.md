@@ -42,6 +42,7 @@ Implemented:
 - post-install hooks
 - Slint-based installer wizard
 - `--silent` runtime mode
+- dual runtime stubs for normal/admin installers
 
 Known issue:
 
@@ -51,14 +52,18 @@ Known issue:
 ## Build
 
 ```bash
-cargo build --release -p setupweaver-packager -p setupweaver-runtime
+cargo build --release \
+  -p setupweaver-packager \
+  -p setupweaver-runtime \
+  -p setupweaver-runtime-admin
 ```
 
 ## Example
 
-Sample config:
+Sample configs:
 
 - `examples/hello/install.toml`
+- `examples/hello/install-admin.toml`
 
 Build installer:
 
@@ -66,6 +71,7 @@ Build installer:
 ./target/release/setupweaver-packager.exe build \
   --config examples/hello/install.toml \
   --stub ./target/release/setupweaver-runtime.exe \
+  --stub-admin ./target/release/setupweaver-runtime-admin.exe \
   --output ./target/release/hello-setup.exe
 ```
 
@@ -80,6 +86,8 @@ Silent install:
 ```bash
 ./target/release/hello-setup.exe --silent
 ```
+
+If `install.require_admin = true`, the packager automatically switches to the admin stub and preserves the embedded `requireAdministrator` manifest.
 
 Quoted post-install args with spaces are supported. Example:
 
@@ -123,4 +131,3 @@ exclude = ["*.pdb"]
 
 - reduce runtime stub size
 - v2 indexed payload format for true parallel extraction
-- per-config UAC manifest pipeline

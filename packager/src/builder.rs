@@ -49,6 +49,8 @@ pub enum PackagerError {
         #[source]
         source: std::io::Error,
     },
+    #[error("config requires admin, but no admin stub was provided")]
+    MissingAdminStub,
     #[error("failed to write output file {path}: {source}")]
     WriteOutput {
         path: PathBuf,
@@ -59,7 +61,12 @@ pub enum PackagerError {
     Tar(#[from] std::io::Error),
 }
 
-pub fn build_installer(config_path: &Path, stub_path: &Path, output_path: &Path) -> Result<(), PackagerError> {
+pub fn build_installer(
+    config_path: &Path,
+    stub_path: &Path,
+    stub_admin_path: Option<&Path>,
+    output_path: &Path,
+) -> Result<(), PackagerError> {
     let config_raw = fs::read_to_string(config_path).map_err(|source| PackagerError::ReadConfig {
         path: config_path.to_path_buf(),
         source,
@@ -89,8 +96,14 @@ pub fn build_installer(config_path: &Path, stub_path: &Path, output_path: &Path)
 
     bar.set_message("writing setup.exe");
 
-    let stub = fs::read(stub_path).map_err(|source| PackagerError::ReadStub {
-        path: stub_path.to_path_buf(),
+    let selected_stub_path = if manifest.config.install.require_admin {
+        stub_admin_path.ok_or(PackagerError::MissingAdminStub)?
+    } else {
+        stub_path
+    };
+
+    let stub = fs::read(selected_stub_path).map_err(|source| PackagerError::ReadStub {
+        path: selected_stub_path.to_path_buf(),
         source,
     })?;
 
