@@ -4,13 +4,16 @@ use std::io::{BufWriter, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use setupweaver_common::{
-    InstallState, InstalledRegistryValue, PackagedFile, PackagedInstaller, PathEntryState, RawRegistryValue, RunWhen,
-    ShortcutSpec, INSTALL_STATE_DIR_NAME, INSTALL_STATE_FILE_NAME, UNINSTALLER_FILE_NAME,
+    InstallState, InstalledRegistryValue, PackagedFile, PackagedInstaller, PathEntryState, RunWhen,
+    INSTALL_STATE_DIR_NAME, INSTALL_STATE_FILE_NAME, UNINSTALLER_FILE_NAME,
 };
+#[cfg(windows)]
+use setupweaver_common::{RawRegistryValue, ShortcutSpec};
 use thiserror::Error;
 
 use crate::payload::{EmbeddedPayload, PayloadError};
@@ -845,6 +848,7 @@ struct InstallMetadata {
     shortcuts: Vec<PathBuf>,
 }
 
+#[cfg(windows)]
 struct PathRestore {
     key: String,
     previous: String,
@@ -856,6 +860,7 @@ struct InstallRollback {
     created_dirs: Vec<PathBuf>,
     created_shortcuts: Vec<PathBuf>,
     registry_changes: Vec<InstalledRegistryValue>,
+    #[cfg(windows)]
     path_restore: Option<PathRestore>,
 }
 
@@ -871,20 +876,24 @@ impl InstallRollback {
         self.created_files.push(path);
     }
 
+    #[cfg(windows)]
     fn record_shortcut(&mut self, path: PathBuf) {
         self.created_shortcuts.push(path);
     }
 
+    #[cfg(windows)]
     fn record_registry_change(&mut self, change: InstalledRegistryValue) {
         self.registry_changes.push(change);
     }
 
+    #[cfg(windows)]
     fn record_path_restore(&mut self, path_restore: PathRestore) {
         self.path_restore = Some(path_restore);
     }
 
     fn rollback(self) {
         let _ = restore_registry_values(&self.registry_changes);
+        #[cfg(windows)]
         let _ = restore_path_value(self.path_restore.as_ref());
 
         for path in self.created_shortcuts.into_iter().rev() {
@@ -1147,6 +1156,7 @@ fn parse_windows_args(value: &str) -> Result<Vec<String>, EngineError> {
     Ok(args)
 }
 
+#[cfg(any(windows, test))]
 fn append_path_entry(current: &str, entry: &str) -> String {
     let normalized_entry = normalize_env_path(entry);
     if current
@@ -1164,6 +1174,7 @@ fn append_path_entry(current: &str, entry: &str) -> String {
     }
 }
 
+#[cfg(windows)]
 fn remove_path_entry(current: &str, entry: &str) -> String {
     let normalized_entry = normalize_env_path(entry);
     current
@@ -1174,6 +1185,7 @@ fn remove_path_entry(current: &str, entry: &str) -> String {
         .join(";")
 }
 
+#[cfg(any(windows, test))]
 fn normalize_env_path(value: &str) -> String {
     let mut normalized = value.trim().replace('/', "\\");
     while normalized.ends_with('\\') && normalized.len() > 3 {
@@ -1272,11 +1284,6 @@ fn restore_registry_values(changes: &[InstalledRegistryValue]) -> Result<(), Eng
         }
     }
 
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn restore_path_value(_restore: Option<&PathRestore>) -> Result<(), EngineError> {
     Ok(())
 }
 
