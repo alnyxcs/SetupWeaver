@@ -515,14 +515,31 @@ impl InstallerEngine {
 
         let state = load_install_state(&context.install_dir)?;
         if state.app_name == self.manifest.config.app.name {
-            return Err(EngineError::InstallConflict {
-                found_app: format!("{} {}", state.app_name, state.app_version),
-            });
+            self.clean_previous_install(&state)?;
+            return Ok(());
         }
 
         Err(EngineError::InstallConflict {
             found_app: state.app_name,
         })
+    }
+
+    fn clean_previous_install(&self, state: &InstallState) -> Result<(), EngineError> {
+        for path_str in &state.installed_files {
+            let _ = fs::remove_file(path_str);
+        }
+
+        for shortcut in &state.shortcuts {
+            let _ = fs::remove_file(shortcut);
+        }
+
+        restore_registry_values(&state.registry_values)?;
+        restore_path_entry(state.path_entry.as_ref())?;
+
+        let install_dir = PathBuf::from(&state.install_dir);
+        let _ = fs::remove_file(install_state_path(&install_dir));
+
+        Ok(())
     }
 
     fn persist_install_state(

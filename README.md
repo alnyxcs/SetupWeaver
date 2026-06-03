@@ -20,11 +20,12 @@ SetupWeaver takes a simple `install.toml` and emits a single self-contained `set
 
 ```text
 SetupWeaver/
-├── common/      # shared schema + packaged manifest types
-├── packager/    # install.toml -> setup.exe
-├── runtime/     # embedded runtime stub + UI + install engine
-├── examples/    # sample packages
-└── docs/        # architecture notes
+├── common/        # shared schema + packaged manifest types
+├── packager/      # install.toml -> setup.exe
+├── packager-gui/  # visual installer builder (Slint UI)
+├── runtime/       # embedded runtime stub + UI + install engine
+├── examples/      # sample packages
+└── docs/          # architecture notes
 ```
 
 ## Current status
@@ -47,14 +48,15 @@ Implemented:
 - `--silent` runtime mode
 - dual runtime stubs for normal/admin installers
 - hand-written runtime CLI parser to keep the stub lean
+- safe in-place upgrade / reinstall for existing managed installs
+- streaming payload assembly in the packager (low peak RAM)
+- visual packager GUI (`packager-gui`) for building installers
 
 Known issue:
 
-- release `packager.exe` fits target well
-- release `runtime.exe` is down to roughly `7.2 MB` here, but still above the long-term `< 3 MB` target with the current Slint+winit software-renderer stack
+- release `runtime.exe` is still above the long-term `< 3 MB` target with the current Slint+winit software-renderer stack (release profile uses `opt-level = "z"` + fat LTO + strip to minimize size)
 - GUI installs keep sequential extraction for smooth progress reporting
-- silent installs now parallelize both across files and across chunks of a large single file
-- reinstall over an existing managed install is still intentionally blocked for safety; uninstall first
+- silent installs parallelize both across files and across chunks of a large single file
 
 ## Build
 
@@ -142,6 +144,6 @@ exclude = ["*.pdb"]
 
 ## Short roadmap
 
-- reduce runtime stub size further
-- stream payload assembly in the packager to reduce peak RAM
-- safe in-place upgrade / reinstall for an existing managed install
+- reduce runtime stub size further (explore Slint feature pruning, custom Win32 UI)
+- delta updates for smaller upgrade packages
+- Add/Remove Programs (ARP) registration

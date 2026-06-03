@@ -1,7 +1,7 @@
 // packager/src/builder.rs
 use std::collections::HashSet;
-use std::fs;
-use std::io::{BufReader, Read};
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -88,38 +88,51 @@ pub fn build_installer(
     bar.enable_steady_tick(std::time::Duration::from_millis(80));
     bar.set_message("compressing payload chunks");
 
-    let compressed_files = compress_payload_files(&payload)?;
-    let manifest = build_manifest(config, license_text, &payload, &compressed_files);
-    let payload_bytes = build_payload_bytes(&manifest, &compressed_files)?;
-
-    bar.set_message("writing setup.exe");
-
-    let selected_stub_path = if manifest.config.install.require_admin {
+    let selected_stub_path = if config.install.require_admin {
         stub_admin_path.ok_or(PackagerError::MissingAdminStub)?
     } else {
         stub_path
     };
 
-    let stub = fs::read(selected_stub_path).map_err(|source| PackagerError::ReadStub {
-        path: selected_stub_path.to_path_buf(),
-        source,
-    })?;
+    bar.set_message("writing setup.exe");
 
-    let archive_offset = stub.len() as u64;
-    let mut output = Vec::with_capacity(stub.len() + payload_bytes.len() + 8);
-    output.extend_from_slice(&stub);
-    output.extend_from_slice(&payload_bytes);
-    output.extend_from_slice(&archive_offset.to_le_bytes());
-
-    fs::write(output_path, output).map_err(|source| PackagerError::WriteOutput {
+    let output_file = File::create(output_path).map_err(|source| PackagerError::WriteOutput {
         path: output_path.to_path_buf(),
         source,
     })?;
+    let mut writer = BufWriter::with_capacity(256 * 1024, output_file);
 
+    // 1. Write runtime stub
+    let stub_len = stream_file_to_writer(selected_stub_path, &mut writer)?;
+    let archive_offset = stub_len as u64;
+
+    // 2. Compress payload chunks and stream to temp file; collect metadata
+    bar.set_message("compressing payload chunks");
+    let (chunk_metas, temp_path) = compress_payload_streaming(&payload)?;
+
+    // 3. Build manifest from chunk metadata
+    let manifest = build_manifest(config, license_text, &payload, &chunk_metas);
+    let manifest_bytes = toml::to_string_pretty(&manifest).expect("manifest serialization must succeed");
+
+    // 4. Write payload header: [magic][manifest_len][manifest_toml]
+    writer.write_all(&PAYLOAD_MAGIC)?;
+    writer.write_all(&(manifest_bytes.len() as u64).to_le_bytes())?;
+    writer.write_all(manifest_bytes.as_bytes())?;
+
+    // 5. Stream compressed chunks from temp file into output
+    let payload_data_size = stream_file_to_writer_path(&temp_path, &mut writer)?;
+
+    // 6. Write 8-byte archive offset trailer
+    writer.write_all(&archive_offset.to_le_bytes())?;
+    writer.flush()?;
+
+    let _ = fs::remove_file(&temp_path);
+
+    let total_payload_size = PAYLOAD_HEADER_SIZE + manifest_bytes.len() + payload_data_size;
     bar.finish_with_message(format!(
         "built {} (payload: {:.2} MiB)",
         output_path.display(),
-        payload_bytes.len() as f64 / (1024.0 * 1024.0)
+        total_payload_size as f64 / (1024.0 * 1024.0)
     ));
 
     Ok(())
@@ -132,13 +145,13 @@ struct PayloadSourceFile {
     size: u64,
 }
 
-struct CompressedPayloadFile {
-    chunks: Vec<CompressedPayloadChunk>,
+struct ChunkMeta {
+    compressed_size: u64,
+    uncompressed_size: u64,
 }
 
-struct CompressedPayloadChunk {
-    compressed_bytes: Vec<u8>,
-    uncompressed_size: u64,
+struct FileMeta {
+    chunks: Vec<ChunkMeta>,
 }
 
 fn load_license_text(base_dir: &Path, license_file: Option<&str>) -> Result<Option<String>, PackagerError> {
@@ -190,8 +203,16 @@ fn collect_payload(config: &InstallConfig, base_dir: &Path) -> Result<Vec<Payloa
     Ok(files)
 }
 
-fn compress_payload_files(files: &[PayloadSourceFile]) -> Result<Vec<CompressedPayloadFile>, PackagerError> {
-    files
+/// Compresses all payload files in parallel, streaming compressed chunks to a
+/// temp file on disk instead of holding them all in RAM.
+///
+/// Returns per-file chunk metadata and the path to the temp data file.
+fn compress_payload_streaming(
+    files: &[PayloadSourceFile],
+) -> Result<(Vec<FileMeta>, PathBuf), PackagerError> {
+    // First pass: compress each file's chunks in parallel, collect (bytes, meta)
+    // per file but write bytes to temp file sequentially to maintain order.
+    let per_file_chunks: Vec<Vec<(Vec<u8>, ChunkMeta)>> = files
         .par_iter()
         .map(|file| {
             let input = fs::File::open(&file.source_path).map_err(|source| PackagerError::ReadInputFile {
@@ -212,35 +233,54 @@ fn compress_payload_files(files: &[PayloadSourceFile]) -> Result<Vec<CompressedP
                 }
 
                 let compressed_bytes = zstd::stream::encode_all(std::io::Cursor::new(&buffer[..read]), 19)?;
-                chunks.push(CompressedPayloadChunk {
-                    compressed_bytes,
+                let meta = ChunkMeta {
+                    compressed_size: compressed_bytes.len() as u64,
                     uncompressed_size: read as u64,
-                });
+                };
+                chunks.push((compressed_bytes, meta));
             }
 
-            Ok(CompressedPayloadFile { chunks })
+            Ok(chunks)
         })
-        .collect()
+        .collect::<Result<Vec<_>, PackagerError>>()?;
+
+    // Second pass: write all compressed data to temp file sequentially.
+    let temp_path = output_temp_path();
+    let temp_file = File::create(&temp_path)?;
+    let mut writer = BufWriter::with_capacity(256 * 1024, temp_file);
+
+    let mut file_metas = Vec::with_capacity(files.len());
+    for file_chunks in per_file_chunks {
+        let mut metas = Vec::with_capacity(file_chunks.len());
+        for (bytes, meta) in file_chunks {
+            writer.write_all(&bytes)?;
+            metas.push(meta);
+        }
+        file_metas.push(FileMeta { chunks: metas });
+    }
+    writer.flush()?;
+
+    Ok((file_metas, temp_path))
 }
 
 fn build_manifest(
     config: InstallConfig,
     license_text: Option<String>,
     files: &[PayloadSourceFile],
-    compressed_files: &[CompressedPayloadFile],
+    file_metas: &[FileMeta],
 ) -> PackagedInstaller {
     let mut next_offset = 0u64;
     let payload = files
         .iter()
-        .zip(compressed_files.iter())
-        .map(|(file, compressed)| {
-            let chunks = compressed
+        .zip(file_metas.iter())
+        .map(|(file, meta)| {
+            let chunks = meta
                 .chunks
                 .iter()
                 .map(|chunk| {
                     let packaged = PackagedChunk {
                         payload_offset: next_offset,
-                        compressed_size: chunk.compressed_bytes.len() as u64,
+                        compressed_size: chunk.compressed_size,
                         uncompressed_size: chunk.uncompressed_size,
                     };
                     next_offset += packaged.compressed_size;
@@ -263,29 +303,45 @@ fn build_manifest(
     }
 }
 
-fn build_payload_bytes(
-    manifest: &PackagedInstaller,
-    compressed_files: &[CompressedPayloadFile],
-) -> Result<Vec<u8>, PackagerError> {
-    let manifest_bytes = toml::to_string_pretty(manifest).expect("manifest serialization must succeed");
-    let payload_capacity = PAYLOAD_HEADER_SIZE
-        + manifest_bytes.len()
-        + compressed_files
-            .iter()
-            .flat_map(|file| file.chunks.iter())
-            .map(|chunk| chunk.compressed_bytes.len())
-            .sum::<usize>();
-
-    let mut payload = Vec::with_capacity(payload_capacity);
-    payload.extend_from_slice(&PAYLOAD_MAGIC);
-    payload.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
-    payload.extend_from_slice(manifest_bytes.as_bytes());
-    for file in compressed_files {
-        for chunk in &file.chunks {
-            payload.extend_from_slice(&chunk.compressed_bytes);
+fn stream_file_to_writer(path: &Path, writer: &mut BufWriter<File>) -> Result<usize, PackagerError> {
+    let mut input = File::open(path).map_err(|source| PackagerError::ReadStub {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0usize;
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
         }
+        writer.write_all(&buffer[..read])?;
+        total += read;
     }
-    Ok(payload)
+    Ok(total)
+}
+
+fn stream_file_to_writer_path(path: &Path, writer: &mut BufWriter<File>) -> Result<usize, PackagerError> {
+    let mut input = File::open(path)?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0usize;
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read])?;
+        total += read;
+    }
+    Ok(total)
+}
+
+fn output_temp_path() -> PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    std::env::temp_dir().join(format!("setupweaver-payload-{ts}.tmp"))
 }
 
 fn expand_matches(base_dir: &Path, pattern: &str, excludes: &[String]) -> Result<Vec<PathBuf>, PackagerError> {

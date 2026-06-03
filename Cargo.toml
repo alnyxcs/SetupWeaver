@@ -25,3 +25,10 @@ codegen-units = 1
 lto = "fat"
 panic = "abort"
 strip = "symbols"
+opt-level = "z"
+
+[profile.release.package.setupweaver-packager]
+opt-level = 3
+
+[profile.release.package.setupweaver-packager-gui]
+opt-level = 3
