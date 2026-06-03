@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "setupweaver_packager"
+path = "src/lib.rs"
+
 [[bin]]
 name = "setupweaver-packager"
 path = "src/main.rs"

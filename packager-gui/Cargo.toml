@@ -1,0 +1,22 @@
+[package]
+name = "setupweaver-packager-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "setupweaver-packager-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+slint = { version = "1.7", default-features = false, features = ["renderer-software", "backend-winit", "std", "compat-1-2"] }
+setupweaver-common = { path = "../common" }
+setupweaver-packager = { path = "../packager" }
+rfd = "0.15"
+
+[build-dependencies]
+slint-build = "1.7"

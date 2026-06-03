@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "packager", "runtime", "runtime-admin"]
+members = ["common", "packager", "packager-gui", "runtime", "runtime-admin"]
 resolver = "2"
 
 [workspace.package]

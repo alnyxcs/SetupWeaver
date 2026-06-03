@@ -1,0 +1,1167 @@
+// packager-gui/ui.slint
+import { Button, LineEdit, TextEdit, CheckBox, ComboBox, VerticalBox, HorizontalBox, ScrollView, Spinner } from "std-widgets.slint";
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <color> accent;
+    callback clicked();
+
+    height: 42px;
+    border-radius: 14px;
+    background: active ? #162033 : transparent;
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalBox {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 10px;
+
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.active ? root.accent : #384860;
+            y: parent.height / 2 - self.height / 2;
+        }
+
+        Text {
+            text: root.label;
+            color: root.active ? white : #9fb0ca;
+            font-size: 14px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component SectionHeader inherits Text {
+    color: white;
+    font-size: 22px;
+    font-weight: 700;
+}
+
+component FieldLabel inherits Text {
+    color: #9fb0ca;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+component Card inherits Rectangle {
+    border-radius: 18px;
+    background: #0d1424;
+}
+
+component FileEntry inherits Rectangle {
+    in property <string> src_text;
+    in property <string> dest_text;
+    in property <string> exclude_text;
+    in property <int> entry_index;
+    callback remove(int);
+    callback src_changed(int, string);
+    callback dest_changed(int, string);
+    callback exclude_changed(int, string);
+    callback browse_src(int);
+
+    border-radius: 14px;
+    background: #121c2f;
+    height: 160px;
+
+    VerticalBox {
+        padding: 14px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+
+            Text {
+                text: "File Rule #" + (root.entry_index + 1);
+                color: white;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Button {
+                text: "Remove";
+                clicked => { root.remove(root.entry_index); }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "Source pattern"; }
+                HorizontalBox {
+                    spacing: 4px;
+                    src-edit := LineEdit {
+                        text: root.src_text;
+                        horizontal-stretch: 1;
+                        edited(value) => { root.src_changed(root.entry_index, value); }
+                    }
+                    Button {
+                        text: "...";
+                        clicked => { root.browse_src(root.entry_index); }
+                    }
+                }
+            }
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "Destination"; }
+                dest-edit := LineEdit {
+                    text: root.dest_text;
+                    edited(value) => { root.dest_changed(root.entry_index, value); }
+                }
+            }
+        }
+
+        VerticalBox {
+            spacing: 4px;
+            FieldLabel { text: "Exclude patterns (comma-separated)"; }
+            exclude-edit := LineEdit {
+                text: root.exclude_text;
+                edited(value) => { root.exclude_changed(root.entry_index, value); }
+            }
+        }
+    }
+}
+
+component ShortcutEntry inherits Rectangle {
+    in property <string> shortcut_name;
+    in property <string> target_text;
+    in property <string> args_text;
+    in property <string> icon_text;
+    in property <int> entry_index;
+    callback remove(int);
+    callback name_changed(int, string);
+    callback target_changed(int, string);
+    callback args_changed(int, string);
+    callback icon_changed(int, string);
+
+    border-radius: 14px;
+    background: #121c2f;
+    height: 128px;
+
+    VerticalBox {
+        padding: 14px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+
+            Text {
+                text: "Shortcut #" + (root.entry_index + 1);
+                color: white;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Button {
+                text: "Remove";
+                clicked => { root.remove(root.entry_index); }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "Name"; }
+                LineEdit {
+                    text: root.shortcut_name;
+                    edited(value) => { root.name_changed(root.entry_index, value); }
+                }
+            }
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "Target"; }
+                LineEdit {
+                    text: root.target_text;
+                    edited(value) => { root.target_changed(root.entry_index, value); }
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "Arguments"; }
+                LineEdit {
+                    text: root.args_text;
+                    edited(value) => { root.args_changed(root.entry_index, value); }
+                }
+            }
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "Icon"; }
+                LineEdit {
+                    text: root.icon_text;
+                    edited(value) => { root.icon_changed(root.entry_index, value); }
+                }
+            }
+        }
+    }
+}
+
+component RegistryEntry inherits Rectangle {
+    in property <string> key_text;
+    in property <string> values_text;
+    in property <int> entry_index;
+    callback remove(int);
+    callback key_changed(int, string);
+    callback values_changed(int, string);
+
+    border-radius: 14px;
+    background: #121c2f;
+    height: 128px;
+
+    VerticalBox {
+        padding: 14px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+
+            Text {
+                text: "Registry #" + (root.entry_index + 1);
+                color: white;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Button {
+                text: "Remove";
+                clicked => { root.remove(root.entry_index); }
+            }
+        }
+
+        VerticalBox {
+            spacing: 4px;
+            FieldLabel { text: "Key (e.g. HKCU\\\\Software\\\\MyApp)"; }
+            LineEdit {
+                text: root.key_text;
+                edited(value) => { root.key_changed(root.entry_index, value); }
+            }
+        }
+
+        VerticalBox {
+            spacing: 4px;
+            FieldLabel { text: "Values (name:type:data, comma-separated)"; }
+            LineEdit {
+                text: root.values_text;
+                edited(value) => { root.values_changed(root.entry_index, value); }
+            }
+        }
+    }
+}
+
+component RunEntry inherits Rectangle {
+    in property <string> cmd_text;
+    in property <string> args_text;
+    in property <int> when_index;
+    in property <int> entry_index;
+    callback remove(int);
+    callback cmd_changed(int, string);
+    callback args_changed(int, string);
+    callback when_changed(int, int);
+
+    border-radius: 14px;
+    background: #121c2f;
+    height: 96px;
+
+    VerticalBox {
+        padding: 14px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+
+            Text {
+                text: "Hook #" + (root.entry_index + 1);
+                color: white;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Button {
+                text: "Remove";
+                clicked => { root.remove(root.entry_index); }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+
+            VerticalBox {
+                horizontal-stretch: 2;
+                spacing: 4px;
+                FieldLabel { text: "Command"; }
+                LineEdit {
+                    text: root.cmd_text;
+                    edited(value) => { root.cmd_changed(root.entry_index, value); }
+                }
+            }
+
+            VerticalBox {
+                horizontal-stretch: 2;
+                spacing: 4px;
+                FieldLabel { text: "Arguments"; }
+                LineEdit {
+                    text: root.args_text;
+                    edited(value) => { root.args_changed(root.entry_index, value); }
+                }
+            }
+
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 4px;
+                FieldLabel { text: "When"; }
+                ComboBox {
+                    model: ["after", "finish"];
+                    current-index: root.when_index;
+                    selected(value) => {
+                        if value == "finish" {
+                            root.when_changed(root.entry_index, 1);
+                        } else {
+                            root.when_changed(root.entry_index, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct FileEntryData {
+    src: string,
+    dest: string,
+    exclude: string,
+}
+
+struct ShortcutEntryData {
+    name: string,
+    target: string,
+    args: string,
+    icon: string,
+}
+
+struct RegistryEntryData {
+    key: string,
+    values: string,
+}
+
+struct RunEntryData {
+    cmd: string,
+    args: string,
+    when_index: int,
+}
+
+export component PackagerWindow inherits Window {
+    // App section
+    in-out property <string> app_name: "";
+    in-out property <string> app_version: "";
+    in-out property <string> app_publisher: "";
+    in-out property <string> app_description: "";
+    in-out property <string> app_icon: "";
+
+    // Install section
+    in-out property <string> default_dir: "";
+    in-out property <bool> add_to_path: false;
+    in-out property <bool> create_desktop_shortcut: true;
+    in-out property <bool> require_admin: false;
+
+    // UI section
+    in-out property <int> theme_index: 2;
+    in-out property <string> accent_color: "#7c3aed";
+    in-out property <string> welcome_text: "";
+    in-out property <string> license_file: "";
+
+    // Files
+    in-out property <[FileEntryData]> file_entries: [];
+
+    // Shortcuts
+    in-out property <[ShortcutEntryData]> shortcut_entries: [];
+
+    // Registry
+    in-out property <[RegistryEntryData]> registry_entries: [];
+
+    // Run hooks
+    in-out property <[RunEntryData]> run_entries: [];
+
+    // Build
+    in-out property <string> stub_path: "";
+    in-out property <string> stub_admin_path: "";
+    in-out property <string> output_path: "setup.exe";
+    in-out property <string> config_path: "";
+    in-out property <float> build_progress: 0;
+    in-out property <string> build_status: "";
+    in-out property <string> build_log: "";
+    in-out property <bool> building: false;
+
+    // Navigation
+    in-out property <int> current_page: 0;
+    in-out property <color> accent: #7c3aed;
+
+    // Callbacks
+    callback nav_clicked(int);
+    callback browse_icon();
+    callback browse_license();
+    callback browse_stub();
+    callback browse_stub_admin();
+    callback browse_output();
+    callback browse_config();
+    callback save_config();
+    callback load_config();
+    callback build_installer();
+    callback add_file_entry();
+    callback remove_file_entry(int);
+    callback file_src_changed(int, string);
+    callback file_dest_changed(int, string);
+    callback file_exclude_changed(int, string);
+    callback browse_file_src(int);
+    callback add_shortcut_entry();
+    callback remove_shortcut_entry(int);
+    callback shortcut_name_changed(int, string);
+    callback shortcut_target_changed(int, string);
+    callback shortcut_args_changed(int, string);
+    callback shortcut_icon_changed(int, string);
+    callback add_registry_entry();
+    callback remove_registry_entry(int);
+    callback registry_key_changed(int, string);
+    callback registry_values_changed(int, string);
+    callback add_run_entry();
+    callback remove_run_entry(int);
+    callback run_cmd_changed(int, string);
+    callback run_args_changed(int, string);
+    callback run_when_changed(int, int);
+    callback generate_toml() -> string;
+
+    title: "SetupWeaver Packager";
+    preferred-width: 1060px;
+    preferred-height: 700px;
+    min-width: 960px;
+    min-height: 640px;
+    background: #0b1020;
+
+    HorizontalBox {
+        padding: 20px;
+        spacing: 18px;
+
+        // Left sidebar
+        Rectangle {
+            width: 220px;
+            border-radius: 20px;
+            background: #101827;
+
+            VerticalBox {
+                padding: 18px;
+                spacing: 6px;
+
+                // Logo
+                Rectangle {
+                    height: 72px;
+                    border-radius: 16px;
+                    background: #141f33;
+
+                    Rectangle {
+                        x: 14px;
+                        y: 14px;
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 14px;
+                        background: root.accent;
+
+                        Text {
+                            text: "SW";
+                            color: white;
+                            font-size: 16px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
+
+                    Text {
+                        x: 70px;
+                        y: 14px;
+                        text: "SetupWeaver";
+                        color: white;
+                        font-size: 17px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        x: 70px;
+                        y: 38px;
+                        text: "Packager Studio";
+                        color: #93a4bf;
+                        font-size: 12px;
+                    }
+                }
+
+                Rectangle { height: 8px; }
+
+                Text {
+                    text: "CONFIGURATION";
+                    color: #5a6e88;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                NavItem {
+                    label: "App Info";
+                    active: root.current_page == 0;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(0); }
+                }
+
+                NavItem {
+                    label: "Install Settings";
+                    active: root.current_page == 1;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(1); }
+                }
+
+                NavItem {
+                    label: "Files";
+                    active: root.current_page == 2;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(2); }
+                }
+
+                NavItem {
+                    label: "UI & Branding";
+                    active: root.current_page == 3;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(3); }
+                }
+
+                NavItem {
+                    label: "Shortcuts";
+                    active: root.current_page == 4;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(4); }
+                }
+
+                NavItem {
+                    label: "Registry";
+                    active: root.current_page == 5;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(5); }
+                }
+
+                NavItem {
+                    label: "Run Hooks";
+                    active: root.current_page == 6;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(6); }
+                }
+
+                Rectangle { height: 10px; }
+
+                Text {
+                    text: "OUTPUT";
+                    color: #5a6e88;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                NavItem {
+                    label: "Build";
+                    active: root.current_page == 7;
+                    accent: root.accent;
+                    clicked => { root.nav_clicked(7); }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Bottom actions
+                HorizontalBox {
+                    spacing: 6px;
+
+                    Button {
+                        text: "Load";
+                        horizontal-stretch: 1;
+                        clicked => { root.load_config(); }
+                    }
+
+                    Button {
+                        text: "Save";
+                        horizontal-stretch: 1;
+                        clicked => { root.save_config(); }
+                    }
+                }
+            }
+        }
+
+        // Main content
+        Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 20px;
+            background: #101827;
+
+            VerticalBox {
+                padding: 24px;
+                spacing: 16px;
+
+                // Page 0: App Info
+                if root.current_page == 0 : VerticalBox {
+                    spacing: 16px;
+
+                    SectionHeader { text: "App Information"; }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 14px;
+
+                                FieldLabel { text: "Application Name *"; }
+                                LineEdit {
+                                    text <=> root.app_name;
+                                    placeholder-text: "My Application";
+                                }
+
+                                FieldLabel { text: "Version *"; }
+                                LineEdit {
+                                    text <=> root.app_version;
+                                    placeholder-text: "1.0.0";
+                                }
+
+                                FieldLabel { text: "Publisher"; }
+                                LineEdit {
+                                    text <=> root.app_publisher;
+                                    placeholder-text: "Your Company";
+                                }
+
+                                FieldLabel { text: "Description"; }
+                                LineEdit {
+                                    text <=> root.app_description;
+                                    placeholder-text: "A short description of the application";
+                                }
+
+                                FieldLabel { text: "Icon (.ico)"; }
+                                HorizontalBox {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        text <=> root.app_icon;
+                                        placeholder-text: "path/to/icon.ico";
+                                        horizontal-stretch: 1;
+                                    }
+                                    Button {
+                                        text: "Browse...";
+                                        clicked => { root.browse_icon(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 1: Install Settings
+                if root.current_page == 1 : VerticalBox {
+                    spacing: 16px;
+
+                    SectionHeader { text: "Install Settings"; }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 14px;
+
+                                FieldLabel { text: "Default Install Directory *"; }
+                                LineEdit {
+                                    text <=> root.default_dir;
+                                    placeholder-text: "{ProgramFiles}\\\\My App";
+                                }
+
+                                Text {
+                                    text: "Tokens: {ProgramFiles}, {AppData}, {Desktop}, {Temp}, {AppName}";
+                                    color: #5a6e88;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+
+                                Rectangle { height: 1px; background: #1a2537; }
+
+                                CheckBox {
+                                    text: "Add to system PATH";
+                                    checked <=> root.add_to_path;
+                                }
+
+                                CheckBox {
+                                    text: "Create desktop shortcut";
+                                    checked <=> root.create_desktop_shortcut;
+                                }
+
+                                CheckBox {
+                                    text: "Require administrator privileges (UAC elevation)";
+                                    checked <=> root.require_admin;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 2: Files
+                if root.current_page == 2 : VerticalBox {
+                    spacing: 16px;
+
+                    HorizontalBox {
+                        SectionHeader { text: "Files"; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "+ Add File Rule";
+                            clicked => { root.add_file_entry(); }
+                        }
+                    }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                if root.file_entries.length == 0 : Rectangle {
+                                    height: 80px;
+                                    border-radius: 14px;
+                                    background: #121c2f;
+
+                                    Text {
+                                        text: "No file rules yet. Click \"+ Add File Rule\" to get started.";
+                                        color: #5a6e88;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: parent.width;
+                                        height: parent.height;
+                                    }
+                                }
+
+                                for entry[i] in root.file_entries : FileEntry {
+                                    src_text: entry.src;
+                                    dest_text: entry.dest;
+                                    exclude_text: entry.exclude;
+                                    entry_index: i;
+                                    remove(idx) => { root.remove_file_entry(idx); }
+                                    src_changed(idx, val) => { root.file_src_changed(idx, val); }
+                                    dest_changed(idx, val) => { root.file_dest_changed(idx, val); }
+                                    exclude_changed(idx, val) => { root.file_exclude_changed(idx, val); }
+                                    browse_src(idx) => { root.browse_file_src(idx); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 3: UI & Branding
+                if root.current_page == 3 : VerticalBox {
+                    spacing: 16px;
+
+                    SectionHeader { text: "UI & Branding"; }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 14px;
+
+                                FieldLabel { text: "Theme"; }
+                                ComboBox {
+                                    model: ["dark", "light", "system"];
+                                    current-index <=> root.theme_index;
+                                }
+
+                                FieldLabel { text: "Accent Color (hex)"; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    LineEdit {
+                                        text <=> root.accent_color;
+                                        placeholder-text: "#7c3aed";
+                                        horizontal-stretch: 1;
+                                    }
+                                    Rectangle {
+                                        width: 36px;
+                                        height: 36px;
+                                        border-radius: 8px;
+                                        background: root.accent;
+                                    }
+                                }
+
+                                FieldLabel { text: "Welcome Text"; }
+                                LineEdit {
+                                    text <=> root.welcome_text;
+                                    placeholder-text: "Welcome to My App";
+                                }
+
+                                FieldLabel { text: "License File"; }
+                                HorizontalBox {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        text <=> root.license_file;
+                                        placeholder-text: "LICENSE.txt";
+                                        horizontal-stretch: 1;
+                                    }
+                                    Button {
+                                        text: "Browse...";
+                                        clicked => { root.browse_license(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 4: Shortcuts
+                if root.current_page == 4 : VerticalBox {
+                    spacing: 16px;
+
+                    HorizontalBox {
+                        SectionHeader { text: "Shortcuts"; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "+ Add Shortcut";
+                            clicked => { root.add_shortcut_entry(); }
+                        }
+                    }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                if root.shortcut_entries.length == 0 : Rectangle {
+                                    height: 80px;
+                                    border-radius: 14px;
+                                    background: #121c2f;
+
+                                    Text {
+                                        text: "No shortcuts defined. The installer will auto-create one if desktop shortcut is enabled.";
+                                        color: #5a6e88;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                for entry[i] in root.shortcut_entries : ShortcutEntry {
+                                    shortcut_name: entry.name;
+                                    target_text: entry.target;
+                                    args_text: entry.args;
+                                    icon_text: entry.icon;
+                                    entry_index: i;
+                                    remove(idx) => { root.remove_shortcut_entry(idx); }
+                                    name_changed(idx, val) => { root.shortcut_name_changed(idx, val); }
+                                    target_changed(idx, val) => { root.shortcut_target_changed(idx, val); }
+                                    args_changed(idx, val) => { root.shortcut_args_changed(idx, val); }
+                                    icon_changed(idx, val) => { root.shortcut_icon_changed(idx, val); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 5: Registry
+                if root.current_page == 5 : VerticalBox {
+                    spacing: 16px;
+
+                    HorizontalBox {
+                        SectionHeader { text: "Registry Entries"; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "+ Add Registry Key";
+                            clicked => { root.add_registry_entry(); }
+                        }
+                    }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                if root.registry_entries.length == 0 : Rectangle {
+                                    height: 80px;
+                                    border-radius: 14px;
+                                    background: #121c2f;
+
+                                    Text {
+                                        text: "No registry entries defined. Most simple installers don't need custom registry keys.";
+                                        color: #5a6e88;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                for entry[i] in root.registry_entries : RegistryEntry {
+                                    key_text: entry.key;
+                                    values_text: entry.values;
+                                    entry_index: i;
+                                    remove(idx) => { root.remove_registry_entry(idx); }
+                                    key_changed(idx, val) => { root.registry_key_changed(idx, val); }
+                                    values_changed(idx, val) => { root.registry_values_changed(idx, val); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 6: Run Hooks
+                if root.current_page == 6 : VerticalBox {
+                    spacing: 16px;
+
+                    HorizontalBox {
+                        SectionHeader { text: "Run Hooks"; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "+ Add Hook";
+                            clicked => { root.add_run_entry(); }
+                        }
+                    }
+
+                    Card {
+                        vertical-stretch: 1;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                if root.run_entries.length == 0 : Rectangle {
+                                    height: 80px;
+                                    border-radius: 14px;
+                                    background: #121c2f;
+
+                                    Text {
+                                        text: "No run hooks defined. Add post-install commands to launch after installation.";
+                                        color: #5a6e88;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                for entry[i] in root.run_entries : RunEntry {
+                                    cmd_text: entry.cmd;
+                                    args_text: entry.args;
+                                    when_index: entry.when_index;
+                                    entry_index: i;
+                                    remove(idx) => { root.remove_run_entry(idx); }
+                                    cmd_changed(idx, val) => { root.run_cmd_changed(idx, val); }
+                                    args_changed(idx, val) => { root.run_args_changed(idx, val); }
+                                    when_changed(idx, val) => { root.run_when_changed(idx, val); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Page 7: Build
+                if root.current_page == 7 : VerticalBox {
+                    spacing: 16px;
+
+                    SectionHeader { text: "Build Installer"; }
+
+                    Card {
+                        vertical-stretch: 0;
+
+                        VerticalBox {
+                            padding: 20px;
+                            spacing: 14px;
+
+                            FieldLabel { text: "Config File (install.toml)"; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit {
+                                    text <=> root.config_path;
+                                    placeholder-text: "install.toml";
+                                    horizontal-stretch: 1;
+                                    enabled: !root.building;
+                                }
+                                Button {
+                                    text: "Browse...";
+                                    enabled: !root.building;
+                                    clicked => { root.browse_config(); }
+                                }
+                            }
+
+                            FieldLabel { text: "Runtime Stub (setupweaver-runtime.exe)"; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit {
+                                    text <=> root.stub_path;
+                                    placeholder-text: "setupweaver-runtime.exe";
+                                    horizontal-stretch: 1;
+                                    enabled: !root.building;
+                                }
+                                Button {
+                                    text: "Browse...";
+                                    enabled: !root.building;
+                                    clicked => { root.browse_stub(); }
+                                }
+                            }
+
+                            FieldLabel { text: "Admin Runtime Stub (optional)"; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit {
+                                    text <=> root.stub_admin_path;
+                                    placeholder-text: "setupweaver-runtime-admin.exe";
+                                    horizontal-stretch: 1;
+                                    enabled: !root.building;
+                                }
+                                Button {
+                                    text: "Browse...";
+                                    enabled: !root.building;
+                                    clicked => { root.browse_stub_admin(); }
+                                }
+                            }
+
+                            FieldLabel { text: "Output File"; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit {
+                                    text <=> root.output_path;
+                                    placeholder-text: "setup.exe";
+                                    horizontal-stretch: 1;
+                                    enabled: !root.building;
+                                }
+                                Button {
+                                    text: "Browse...";
+                                    enabled: !root.building;
+                                    clicked => { root.browse_output(); }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #1a2537; }
+
+                            HorizontalBox {
+                                spacing: 10px;
+                                Rectangle { horizontal-stretch: 1; }
+
+                                Button {
+                                    text: "Save Config";
+                                    enabled: !root.building;
+                                    clicked => { root.save_config(); }
+                                }
+
+                                Button {
+                                    text: root.building ? "Building..." : "Build Installer";
+                                    enabled: !root.building;
+                                    clicked => { root.build_installer(); }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.building || root.build_status != "" : Card {
+                        vertical-stretch: 0;
+
+                        VerticalBox {
+                            padding: 20px;
+                            spacing: 10px;
+
+                            if root.building : Rectangle {
+                                height: 10px;
+                                border-radius: 999px;
+                                background: #1a2537;
+
+                                Rectangle {
+                                    width: parent.width * clamp(root.build_progress, 0, 1);
+                                    height: parent.height;
+                                    border-radius: 999px;
+                                    background: root.accent;
+                                }
+                            }
+
+                            Text {
+                                text: root.build_status;
+                                color: white;
+                                font-size: 15px;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    if root.build_log != "" : Card {
+                        vertical-stretch: 1;
+
+                        VerticalBox {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "Build Log";
+                                color: #9fb0ca;
+                                font-size: 13px;
+                                font-weight: 600;
+                            }
+
+                            TextEdit {
+                                text: root.build_log;
+                                read-only: true;
+                                wrap: word-wrap;
+                                vertical-stretch: 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

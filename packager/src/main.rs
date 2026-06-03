@@ -1,10 +1,10 @@
 // packager/src/main.rs
-mod builder;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use setupweaver_packager::builder;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Build single-file SetupWeaver installers")]
