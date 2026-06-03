@@ -1,149 +1,244 @@
-# SetupWeaver
+<h1 align="center">SetupWeaver</h1>
 
-Blazing-fast modern Windows installer builder in Rust.
+<p align="center">
+  <b>Blazing-fast modern Windows installer builder written in Rust</b>
+</p>
 
-SetupWeaver takes a simple `install.toml` and emits a single self-contained `setup.exe`:
+<p align="center">
+  <a href="https://github.com/alnyx-dev/SetupWeaver/actions"><img src="https://github.com/alnyx-dev/SetupWeaver/actions/workflows/rust.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/alnyx-dev/SetupWeaver/releases"><img src="https://img.shields.io/github/v/release/alnyx-dev/SetupWeaver?label=release&color=blue" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
+  <img src="https://img.shields.io/badge/lang-Rust-dea584?logo=rust" alt="Rust">
+</p>
 
-```text
-[runtime stub][zstd-compressed payload][8-byte payload offset]
+---
+
+SetupWeaver takes a simple `install.toml` config and your application files, and produces a **single self-contained `setup.exe`** — no .NET, no external unpacker, no network required.
+
+## How it works
+
+```
+install.toml + app files  ──►  setupweaver-packager  ──►  setup.exe
 ```
 
-## Goals
+The output binary has this layout:
 
-- cold start UI under 200 ms on HDD
-- one-file output
-- readable config
-- modern installer UI
-- no .NET, no external unpacker, no network by default
-
-## Workspace
-
-```text
-SetupWeaver/
-├── common/        # shared schema + packaged manifest types
-├── packager/      # install.toml -> setup.exe
-├── packager-gui/  # visual installer builder (Slint UI)
-├── runtime/       # embedded runtime stub + UI + install engine
-├── examples/      # sample packages
-└── docs/          # architecture notes
+```
+[ runtime stub ][ MAGIC ][ manifest ][ zstd-compressed chunks ][ trailer ]
 ```
 
-## Current status
+At install time the embedded runtime stub reads its own tail, decompresses the payload, and runs the full install — UI wizard, file extraction, registry, PATH, shortcuts, post-install hooks.
 
-Implemented:
+## Features
 
-- TOML parsing + validation
-- trailer-based single-file payload format
-- indexed payload manifest + chunked zstd frames
-- runtime payload mmap + zero-copy manifest loading
-- file extraction
-- install state recording
-- silent uninstall
-- registry writes
-- PATH mutation
-- desktop shortcut creation
-- post-install hooks
-- rollback of newly created files/shortcuts plus in-session registry/PATH changes on install failure
-- Slint-based installer wizard
-- `--silent` runtime mode
-- dual runtime stubs for normal/admin installers
-- hand-written runtime CLI parser to keep the stub lean
-- safe in-place upgrade / reinstall for existing managed installs
-- streaming payload assembly in the packager (low peak RAM)
-- visual packager GUI (`packager-gui`) for building installers
+| Category | Details |
+|---|---|
+| **Single-file output** | One `setup.exe` with everything embedded |
+| **Modern UI** | Dark-themed Slint wizard (Welcome → License → Install → Finish → Error) |
+| **Fast** | Cold-start UI under 200 ms; zstd level 19 compression; parallel extraction in silent mode |
+| **Config-driven** | Readable `install.toml` — no scripting needed |
+| **Registry & PATH** | Write HKCU/HKLM keys, mutate PATH, auto-restore on failure |
+| **Shortcuts** | Desktop shortcut creation |
+| **Post-install hooks** | Run commands after install or on finish (`[[run]]` with `when = "after"` / `"finish"`) |
+| **Silent mode** | `--silent` for unattended install, `--uninstall` for removal |
+| **Rollback** | Files, shortcuts, registry, and PATH changes rolled back on failure |
+| **In-place upgrade** | Safe reinstall over existing managed install (auto-cleans old files) |
+| **Dual stubs** | Normal and `requireAdministrator` variants |
+| **Streaming packager** | Low peak RAM — compressed chunks streamed to disk, not held in memory |
+| **Visual packager GUI** | Slint-based builder with 8 screens — no command line needed |
+| **CI-ready** | GitHub Actions: fmt, clippy, Linux + Windows builds, auto-release on tag |
 
-Known issue:
+## Getting started
 
-- release `runtime.exe` is still above the long-term `< 3 MB` target with the current Slint+winit software-renderer stack (release profile uses `opt-level = "z"` + fat LTO + strip to minimize size)
-- GUI installs keep sequential extraction for smooth progress reporting
-- silent installs parallelize both across files and across chunks of a large single file
+### Prerequisites
 
-## Build
+- [Rust](https://rustup.rs/) (stable, latest)
+- **Linux only** (for building/developing):
+  ```bash
+  sudo apt-get install -y pkg-config libfontconfig1-dev libxcb-render0-dev \
+    libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev
+  ```
+- **Windows**: no extra dependencies
+
+### Build
 
 ```bash
-cargo build --release \
-  -p setupweaver-packager \
-  -p setupweaver-runtime \
-  -p setupweaver-runtime-admin
+git clone https://github.com/alnyx-dev/SetupWeaver.git
+cd SetupWeaver
+
+# Build all tools
+cargo build --release -p setupweaver-packager \
+                      -p setupweaver-packager-gui \
+                      -p setupweaver-runtime \
+                      -p setupweaver-runtime-admin
 ```
 
-## Example
+This produces 4 binaries in `target/release/`:
 
-Sample configs:
+| Binary | Description |
+|---|---|
+| `setupweaver-packager.exe` | CLI packager — builds installers from `install.toml` |
+| `setupweaver-packager-gui.exe` | GUI packager — visual installer builder |
+| `setupweaver-runtime.exe` | Installer stub (standard privileges) |
+| `setupweaver-runtime-admin.exe` | Installer stub (admin privileges) |
 
-- `examples/hello/install.toml`
-- `examples/hello/install-admin.toml`
+### Create an installer
 
-Build installer:
+**Option A — CLI:**
 
 ```bash
-./target/release/setupweaver-packager.exe build \
-  --config examples/hello/install.toml \
-  --stub ./target/release/setupweaver-runtime.exe \
-  --stub-admin ./target/release/setupweaver-runtime-admin.exe \
-  --output ./target/release/hello-setup.exe
+setupweaver-packager build \
+  --config install.toml \
+  --stub setupweaver-runtime.exe \
+  --stub-admin setupweaver-runtime-admin.exe \
+  --output my-app-setup.exe
 ```
 
-Inspect embedded manifest:
+**Option B — GUI:**
+
+Launch `setupweaver-packager-gui.exe` and fill in 8 screens: App Info, Install Settings, Files, UI & Branding, Shortcuts, Registry, Run Hooks, Build.
+
+### Run the installer
 
 ```bash
-./target/release/hello-setup.exe --print-manifest
+# GUI install
+my-app-setup.exe
+
+# Silent install
+my-app-setup.exe --silent
+
+# Silent uninstall
+my-app-setup.exe --uninstall --install-dir "C:\Program Files\My App"
+
+# Inspect embedded manifest
+my-app-setup.exe --print-manifest
 ```
 
-Silent install:
+> If `require_admin = true`, the packager automatically uses the admin stub with the embedded `requireAdministrator` manifest.
 
-```bash
-./target/release/hello-setup.exe --silent
-```
+## Configuration
 
-Silent uninstall:
-
-```bash
-./target/release/hello-setup.exe --uninstall --install-dir "C:\\Program Files\\Hello App"
-```
-
-If `install.require_admin = true`, the packager automatically switches to the admin stub and preserves the embedded `requireAdministrator` manifest.
-
-Quoted post-install args with spaces are supported. Example:
-
-```toml
-[[run]]
-cmd = "{install_dir}\\HelloApp.exe"
-args = "--profile \"safe install\" --root \"{install_dir}\\data\""
-when = "finish"
-```
-
-## install.toml shape
+Create an `install.toml` in your project root:
 
 ```toml
 [app]
 name = "My App"
 version = "1.0.0"
-publisher = "Acme"
+publisher = "Acme Inc."
+description = "A great application"
+icon = "app.ico"
 
 [install]
 default_dir = "{ProgramFiles}\\My App"
-add_to_path = false
+add_to_path = true
 create_desktop_shortcut = true
 require_admin = false
 
 [ui]
-theme = "system"
+theme = "system"          # "dark", "light", or "system"
 accent_color = "#7c3aed"
-welcome_text = "Welcome"
+welcome_text = "Welcome to My App installer"
+license_file = "LICENSE.txt"
 
 [[files]]
-src = "app/**/*"
+src = "bin/**/*"
 dest = "{install_dir}"
-exclude = ["*.pdb"]
+exclude = ["*.pdb", "*.log"]
+
+[[files]]
+src = "docs/readme.txt"
+dest = "{install_dir}\\docs"
+
+[[shortcuts]]
+name = "My App"
+target = "{install_dir}\\myapp.exe"
+args = ""
+icon = "{install_dir}\\myapp.ico"
+
+[[registry]]
+key = "HKCU\\Software\\MyApp"
+
+[[registry.values]]
+name = "Version"
+type = "string"
+data = "1.0.0"
+
+[[registry.values]]
+name = "Flags"
+type = "dword"
+data = "1"
+
+[[run]]
+cmd = "{install_dir}\\myapp.exe"
+args = "--setup"
+when = "after"
+
+[[run]]
+cmd = "{install_dir}\\myapp.exe"
+when = "finish"
 ```
 
-## Architecture docs
+### Variables
 
-- `docs/ARCHITECTURE.md`
+| Variable | Expands to |
+|---|---|
+| `{install_dir}` | User-chosen install directory |
+| `{ProgramFiles}` | `C:\Program Files` or equivalent |
 
-## Short roadmap
+### Registry value types
 
-- reduce runtime stub size further (explore Slint feature pruning, custom Win32 UI)
-- delta updates for smaller upgrade packages
-- Add/Remove Programs (ARP) registration
+`string`, `dword`, `qword`
+
+## Project structure
+
+```
+SetupWeaver/
+├── common/          # Shared types: InstallConfig, PackagedInstaller, validation
+├── packager/        # CLI packager: install.toml + files → setup.exe
+├── packager-gui/    # Visual installer builder (Slint UI)
+├── runtime/         # Embedded stub: install engine + Slint wizard UI
+├── runtime-admin/   # Admin stub (requireAdministrator manifest)
+├── examples/        # Sample install.toml configs
+│   └── hello/       # Hello App example
+├── docs/            # Architecture documentation
+├── .github/         # CI workflows (build, lint, release)
+├── CONTRIBUTING.md  # Build, test, and contribution guide
+└── CHANGELOG.md     # Release history
+```
+
+## Architecture
+
+The installer binary format:
+
+```
+┌──────────────┬───────┬─────────────┬──────────────────┬────────────┬─────────┐
+│ Runtime stub │ MAGIC │ manifest_len│  manifest (TOML) │ zstd chunks│ trailer │
+│  (.exe)      │ 8 B   │    8 B      │  variable        │  variable  │   8 B   │
+└──────────────┴───────┴─────────────┴──────────────────┴────────────┴─────────┘
+```
+
+- **Runtime stub**: self-contained Rust executable with Slint UI
+- **Manifest**: TOML-serialized `PackagedInstaller` (config + file index + chunk offsets)
+- **Payload**: zstd-compressed file chunks (8 MB per chunk, level 19)
+- **Trailer**: 8-byte offset pointing to the start of the archive section
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full deep-dive.
+
+## Roadmap
+
+- [ ] Reduce runtime stub size (explore Slint feature pruning, custom Win32 UI)
+- [ ] Delta updates for smaller upgrade packages
+- [ ] Add/Remove Programs (ARP) registration
+- [ ] Start Menu shortcuts
+- [ ] Light/dark/system theme switching
+- [ ] Browse button for install directory
+- [ ] ETA display during installation
+- [ ] Localization (EN, RU)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, coding standards, and how to submit PRs.
+
+## License
+
+This project is open source. See the repository for license details.
