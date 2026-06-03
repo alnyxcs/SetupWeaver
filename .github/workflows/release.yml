@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build release binaries
+      run: cargo build --release -p setupweaver-packager -p setupweaver-packager-gui -p setupweaver-runtime -p setupweaver-runtime-admin
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-${{ matrix.target }}
+        path: |
+          target/release/setupweaver-packager.exe
+          target/release/setupweaver-packager-gui.exe
+          target/release/setupweaver-runtime.exe
+          target/release/setupweaver-runtime-admin.exe
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: binaries-x86_64-pc-windows-msvc
+        path: dist/
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        files: |
+          dist/setupweaver-packager.exe
+          dist/setupweaver-packager-gui.exe
+          dist/setupweaver-runtime.exe
+          dist/setupweaver-runtime-admin.exe
