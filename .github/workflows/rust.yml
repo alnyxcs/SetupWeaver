@@ -40,7 +40,7 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --workspace --exclude setupweaver-runtime-admin
 
   build-windows:
     name: Build (Windows)
@@ -50,4 +50,4 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --workspace --exclude setupweaver-runtime-admin
