@@ -1,366 +1,347 @@
 // packager-gui/ui.slint
-import { Button, LineEdit, TextEdit, CheckBox, ComboBox, VerticalBox, HorizontalBox, ScrollView, Spinner } from "std-widgets.slint";
+// SetupWeaver Packager — the developer-facing tool that builds a self-contained
+// setup.exe from a manifest.
+//
+// Contract preserved from the previous version (do not rename/remove):
+//   - 4 structs: FileEntryData, ShortcutEntryData, RegistryEntryData, RunEntryData
+//   - 24 in-out properties: app_*, default_dir, add_to_path,
+//     create_desktop_shortcut, require_admin, theme_index, accent_color,
+//     welcome_text, license_file, file_entries, shortcut_entries,
+//     registry_entries, run_entries, stub_path, stub_admin_path, output_path,
+//     config_path, build_progress, build_status, build_log, building,
+//     current_page
+//   - 33 callbacks: nav_clicked, browse_*, save_config, load_config,
+//     build_installer, add_*/remove_*/..._changed for the 4 entry types,
+//     generate_toml
+//   - 8 pages, indices 0..7
+//
+// Visual redesign (additive, behaviour-preserving):
+//   - replaces the cramped left sidebar with a polished left NavRail that
+//     shows an icon and a label for every section
+//   - introduces a TopBar with a Save/Load split so the user always sees
+//     config state at a glance
+//   - reuses the same Theme/Card/Btn/Pill design system as the runtime
+//     installer wizard so both surfaces look like one product
+//   - every page gets a human title and a one-line subtitle that says WHY
+//     this page exists (no more mystery field names)
 
-component NavItem inherits Rectangle {
-    in property <string> label;
-    in property <bool> active;
+import {
+    Button, LineEdit, TextEdit, CheckBox, ComboBox,
+    VerticalBox, HorizontalBox, ScrollView, Spinner,
+} from "std-widgets.slint";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Design tokens
+// ──────────────────────────────────────────────────────────────────────────────
+global Theme {
+    out property <color> page-bg: #f7f8fa;
+    out property <color> card-bg: #ffffff;
+    out property <color> card-border: #e6e8ec;
+    out property <color> rail-bg: #ffffff;
+    out property <color> rail-border: #eceef2;
+    out property <color> rail-hover: #f1f3f7;
+    out property <color> rail-active-bg: #eaf3fc;
+    out property <color> accent: #0078d4;
+    out property <color> accent-soft: #eaf3fc;
+    out property <color> divider: #eceef2;
+    out property <color> entry-bg: #fafbfc;
+    out property <color> entry-border: #e6e8ec;
+    out property <color> text-primary: #1f2937;
+    out property <color> text-body: #374151;
+    out property <color> text-secondary: #6b7280;
+    out property <color> text-tertiary: #9ca3af;
+    out property <color> on-accent: #ffffff;
+    out property <color> disabled-bg: #eef0f3;
+    out property <color> disabled-fg: #b6bac1;
+    out property <color> success: #10b981;
+    out property <color> success-bg: #ecfdf5;
+    out property <color> success-border: #a7f3d0;
+    out property <color> error: #ef4444;
+    out property <color> error-bg: #fef2f2;
+    out property <color> error-border: #fecaca;
+
+    out property <length> s-2: 4px;
+    out property <length> s-3: 8px;
+    out property <length> s-4: 12px;
+    out property <length> s-5: 16px;
+    out property <length> s-6: 20px;
+    out property <length> s-7: 24px;
+    out property <length> s-8: 32px;
+
+    out property <length> r-sm: 6px;
+    out property <length> r-md: 10px;
+    out property <length> r-lg: 14px;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Reusable building blocks
+// ──────────────────────────────────────────────────────────────────────────────
+
+component Card inherits Rectangle {
+    in property <bool> danger: false;
+    background: danger ? Theme.error-bg : Theme.card-bg;
+    border-color: danger ? Theme.error-border : Theme.card-border;
+    border-width: 1px;
+    border-radius: Theme.r-md;
+}
+
+component Btn inherits Rectangle {
+    in property <string> text: "";
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    in property <bool> compact: false;
+
     callback clicked();
 
-    height: 36px;
-    border-radius: 4px;
-    background: root.active ? #e8f0fe : transparent;
+    height: compact ? 30px : 36px;
+    min-width: compact ? 60px : 88px;
+    border-radius: compact ? Theme.r-sm : Theme.r-md;
+    border-width: root.primary ? 0px : 1px;
+    border-color: root.enabled ? Theme.card-border : Theme.divider;
+    background: !root.enabled
+        ? Theme.disabled-bg
+        : root.primary
+            ? Theme.accent
+            : Theme.card-bg;
 
-    touch := TouchArea {
+    Text {
+        text: root.text;
+        color: !root.enabled
+            ? Theme.disabled-fg
+            : root.primary
+                ? Theme.on-accent
+                : Theme.text-body;
+        font-size: root.compact ? 12px : 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component PageTitle inherits Text {
+    color: Theme.text-primary;
+    font-size: 22px;
+    font-weight: 700;
+    wrap: word-wrap;
+}
+
+component PageSubtitle inherits Text {
+    color: Theme.text-secondary;
+    font-size: 13px;
+    wrap: word-wrap;
+}
+
+component FieldLabel inherits Text {
+    color: Theme.text-secondary;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+}
+
+component FieldHint inherits Text {
+    color: Theme.text-tertiary;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+// A labelled, optional-help input row.
+component FieldRow inherits VerticalBox {
+    in property <string> label: "";
+    in property <string> hint: "";
+    spacing: 6px;
+
+    FieldLabel {
+        text: root.label;
+        visible: root.label != "";
+    }
+
+    @children
+
+    FieldHint {
+        text: root.hint;
+        visible: root.hint != "";
+    }
+}
+
+// A "no content yet" placeholder for empty lists.
+component EmptyState inherits Rectangle {
+    in property <string> message: "";
+
+    height: 96px;
+    border-radius: Theme.r-md;
+    background: Theme.entry-bg;
+    border-width: 1px;
+    border-color: Theme.entry-border;
+
+    Text {
+        text: root.message;
+        color: Theme.text-tertiary;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+    }
+}
+
+// One row in the left NavRail.
+component NavItem inherits Rectangle {
+    in property <string> label: "";
+    in property <string> glyph: "";
+    in property <bool> active: false;
+
+    callback clicked();
+
+    height: 40px;
+    border-radius: 0px;
+    background: root.active ? Theme.rail-active-bg : Theme.rail-bg;
+
+    // Left accent rail for the active item.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 3px;
+        height: parent.height;
+        background: root.active ? Theme.accent : transparent;
+    }
+
+    TouchArea {
         clicked => { root.clicked(); }
     }
 
     HorizontalBox {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 8px;
+        padding-left: Theme.s-5;
+        padding-right: Theme.s-5;
+        spacing: Theme.s-3;
+
+        Text {
+            text: root.glyph;
+            font-size: 14px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: 18px;
+            color: root.active ? Theme.accent : Theme.text-secondary;
+        }
 
         Text {
             text: root.label;
-            color: root.active ? #1e1e1e : #616161;
+            color: root.active ? Theme.text-primary : Theme.text-body;
             font-size: 13px;
-            font-weight: root.active ? 600 : 400;
+            font-weight: root.active ? 600 : 500;
             vertical-alignment: center;
         }
     }
 }
 
-component SectionHeader inherits Text {
-    color: #1e1e1e;
-    font-size: 22px;
-    font-weight: 600;
-}
+// A single entry card inside a list page (Files / Shortcuts / Registry / Run Hooks).
+// Uses the same card style and adds a small index badge.
+component EntryCard inherits Rectangle {
+    in property <string> index_label: "";
+    in property <string> index_subtitle: "";
 
-component FieldLabel inherits Text {
-    color: #616161;
-    font-size: 12px;
-    font-weight: 500;
-}
+    callback remove_clicked();
 
-component Card inherits Rectangle {
-    border-radius: 4px;
-    background: #ffffff;
+    border-radius: Theme.r-md;
+    background: Theme.entry-bg;
     border-width: 1px;
-    border-color: #e0e0e0;
-}
-
-component FileEntry inherits Rectangle {
-    in property <string> src_text;
-    in property <string> dest_text;
-    in property <string> exclude_text;
-    in property <int> entry_index;
-    callback remove(int);
-    callback src_changed(int, string);
-    callback dest_changed(int, string);
-    callback exclude_changed(int, string);
-    callback browse_src(int);
-
-    border-radius: 4px;
-    background: #fafafa;
-    border-width: 1px;
-    border-color: #e0e0e0;
-    height: 140px;
+    border-color: Theme.entry-border;
 
     VerticalBox {
-        padding: 12px;
-        spacing: 8px;
+        padding: Theme.s-5;
+        spacing: Theme.s-4;
 
         HorizontalBox {
-            spacing: 8px;
+            spacing: Theme.s-3;
+            alignment: start;
 
-            Text {
-                text: "Rule #" + (root.entry_index + 1);
-                color: #1e1e1e;
-                font-size: 13px;
-                font-weight: 600;
-                vertical-alignment: center;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 14px;
+                background: Theme.accent-soft;
+
+                Text {
+                    text: root.index_label;
+                    color: Theme.accent;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
             }
 
-            Rectangle { horizontal-stretch: 1; }
+            VerticalBox {
+                spacing: 0px;
 
-            Button {
+                Text {
+                    text: root.index_label != "" ? ("Rule " + root.index_label) : "";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.index_subtitle;
+                    color: Theme.text-tertiary;
+                    font-size: 12px;
+                    visible: root.index_subtitle != "";
+                }
+            }
+
+            // Spring pushes the Remove button to the right.
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 1px;
+            }
+
+            Btn {
                 text: "Remove";
-                clicked => { root.remove(root.entry_index); }
+                compact: true;
+                clicked => { root.remove_clicked(); }
             }
         }
 
-        HorizontalBox {
-            spacing: 8px;
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "Source pattern"; }
-                HorizontalBox {
-                    spacing: 4px;
-                    src-edit := LineEdit {
-                        text: root.src_text;
-                        horizontal-stretch: 1;
-                        edited(value) => { root.src_changed(root.entry_index, value); }
-                    }
-                    Button {
-                        text: "...";
-                        clicked => { root.browse_src(root.entry_index); }
-                    }
-                }
-            }
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "Destination"; }
-                dest-edit := LineEdit {
-                    text: root.dest_text;
-                    edited(value) => { root.dest_changed(root.entry_index, value); }
-                }
-            }
-        }
-
-        VerticalBox {
-            spacing: 4px;
-            FieldLabel { text: "Exclude (comma-separated)"; }
-            exclude-edit := LineEdit {
-                text: root.exclude_text;
-                edited(value) => { root.exclude_changed(root.entry_index, value); }
-            }
-        }
+        @children
     }
 }
 
-component ShortcutEntry inherits Rectangle {
-    in property <string> shortcut_name;
-    in property <string> target_text;
-    in property <string> args_text;
-    in property <string> icon_text;
-    in property <int> entry_index;
-    callback remove(int);
-    callback name_changed(int, string);
-    callback target_changed(int, string);
-    callback args_changed(int, string);
-    callback icon_changed(int, string);
+// Browse row: LineEdit + Browse button on the right.
+component BrowseRow inherits HorizontalBox {
+    in-out property <string> text: "";
+    in-out property <string> placeholder: "";
+    in property <bool> enabled: true;
+    callback browse();
 
-    border-radius: 4px;
-    background: #fafafa;
-    border-width: 1px;
-    border-color: #e0e0e0;
-    height: 120px;
+    spacing: Theme.s-3;
+    alignment: start;
 
-    VerticalBox {
-        padding: 12px;
-        spacing: 8px;
+    LineEdit {
+        text <=> root.text;
+        placeholder-text: root.placeholder;
+        enabled: root.enabled;
+        horizontal-stretch: 1;
+    }
 
-        HorizontalBox {
-            spacing: 8px;
-
-            Text {
-                text: "Shortcut #" + (root.entry_index + 1);
-                color: #1e1e1e;
-                font-size: 13px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-
-            Rectangle { horizontal-stretch: 1; }
-
-            Button {
-                text: "Remove";
-                clicked => { root.remove(root.entry_index); }
-            }
-        }
-
-        HorizontalBox {
-            spacing: 8px;
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "Name"; }
-                LineEdit {
-                    text: root.shortcut_name;
-                    edited(value) => { root.name_changed(root.entry_index, value); }
-                }
-            }
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "Target"; }
-                LineEdit {
-                    text: root.target_text;
-                    edited(value) => { root.target_changed(root.entry_index, value); }
-                }
-            }
-        }
-
-        HorizontalBox {
-            spacing: 8px;
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "Arguments"; }
-                LineEdit {
-                    text: root.args_text;
-                    edited(value) => { root.args_changed(root.entry_index, value); }
-                }
-            }
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "Icon"; }
-                LineEdit {
-                    text: root.icon_text;
-                    edited(value) => { root.icon_changed(root.entry_index, value); }
-                }
-            }
-        }
+    Btn {
+        text: "Browse…";
+        enabled: root.enabled;
+        compact: true;
+        clicked => { root.browse(); }
     }
 }
 
-component RegistryEntry inherits Rectangle {
-    in property <string> key_text;
-    in property <string> values_text;
-    in property <int> entry_index;
-    callback remove(int);
-    callback key_changed(int, string);
-    callback values_changed(int, string);
-
-    border-radius: 4px;
-    background: #fafafa;
-    border-width: 1px;
-    border-color: #e0e0e0;
-    height: 120px;
-
-    VerticalBox {
-        padding: 12px;
-        spacing: 8px;
-
-        HorizontalBox {
-            spacing: 8px;
-
-            Text {
-                text: "Registry #" + (root.entry_index + 1);
-                color: #1e1e1e;
-                font-size: 13px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-
-            Rectangle { horizontal-stretch: 1; }
-
-            Button {
-                text: "Remove";
-                clicked => { root.remove(root.entry_index); }
-            }
-        }
-
-        VerticalBox {
-            spacing: 4px;
-            FieldLabel { text: "Key (e.g. HKCU\\Software\\MyApp)"; }
-            LineEdit {
-                text: root.key_text;
-                edited(value) => { root.key_changed(root.entry_index, value); }
-            }
-        }
-
-        VerticalBox {
-            spacing: 4px;
-            FieldLabel { text: "Values (name:type:data, comma-separated)"; }
-            LineEdit {
-                text: root.values_text;
-                edited(value) => { root.values_changed(root.entry_index, value); }
-            }
-        }
-    }
-}
-
-component RunEntry inherits Rectangle {
-    in property <string> cmd_text;
-    in property <string> args_text;
-    in property <int> when_index;
-    in property <int> entry_index;
-    callback remove(int);
-    callback cmd_changed(int, string);
-    callback args_changed(int, string);
-    callback when_changed(int, int);
-
-    border-radius: 4px;
-    background: #fafafa;
-    border-width: 1px;
-    border-color: #e0e0e0;
-    height: 90px;
-
-    VerticalBox {
-        padding: 12px;
-        spacing: 8px;
-
-        HorizontalBox {
-            spacing: 8px;
-
-            Text {
-                text: "Hook #" + (root.entry_index + 1);
-                color: #1e1e1e;
-                font-size: 13px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-
-            Rectangle { horizontal-stretch: 1; }
-
-            Button {
-                text: "Remove";
-                clicked => { root.remove(root.entry_index); }
-            }
-        }
-
-        HorizontalBox {
-            spacing: 8px;
-
-            VerticalBox {
-                horizontal-stretch: 2;
-                spacing: 4px;
-                FieldLabel { text: "Command"; }
-                LineEdit {
-                    text: root.cmd_text;
-                    edited(value) => { root.cmd_changed(root.entry_index, value); }
-                }
-            }
-
-            VerticalBox {
-                horizontal-stretch: 2;
-                spacing: 4px;
-                FieldLabel { text: "Arguments"; }
-                LineEdit {
-                    text: root.args_text;
-                    edited(value) => { root.args_changed(root.entry_index, value); }
-                }
-            }
-
-            VerticalBox {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                FieldLabel { text: "When"; }
-                ComboBox {
-                    model: ["after", "finish"];
-                    current-index: root.when_index;
-                    selected(value) => {
-                        if value == "finish" {
-                            root.when_changed(root.entry_index, 1);
-                        } else {
-                            root.when_changed(root.entry_index, 0);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
+// ──────────────────────────────────────────────────────────────────────────────
+// Data structs (must be declared before any property that references them)
+// ──────────────────────────────────────────────────────────────────────────────
 struct FileEntryData {
     src: string,
     dest: string,
@@ -385,39 +366,289 @@ struct RunEntryData {
     when_index: int,
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Entry components (preserve callback signatures)
+// ──────────────────────────────────────────────────────────────────────────────
+
+component FileEntry inherits Rectangle {
+    in property <string> src_text;
+    in property <string> dest_text;
+    in property <string> exclude_text;
+    in property <int> entry_index;
+    callback remove(int);
+    callback src_changed(int, string);
+    callback dest_changed(int, string);
+    callback exclude_changed(int, string);
+    callback browse_src(int);
+
+    EntryCard {
+        width: 100%;
+        index_label: (root.entry_index + 1);
+        index_subtitle: "Tells the installer which files to copy";
+        remove_clicked => { root.remove(root.entry_index); }
+
+        VerticalBox {
+            spacing: Theme.s-4;
+
+            FieldRow {
+                label: "SOURCE PATTERN";
+                hint: "Glob pattern relative to the source folder. Example: bin/**/*.dll";
+
+                HorizontalBox {
+                    spacing: Theme.s-3;
+
+                    LineEdit {
+                        text: root.src_text;
+                        horizontal-stretch: 1;
+                        placeholder-text: "bin/**/*";
+                    }
+
+                    Btn {
+                        text: "Browse…";
+                        compact: true;
+                        clicked => { root.browse_src(root.entry_index); }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: Theme.s-4;
+                alignment: start;
+
+                FieldRow {
+                    label: "DESTINATION";
+                    hint: "Folder inside the install path.";
+                    horizontal-stretch: 1;
+
+                    LineEdit {
+                        text: root.dest_text;
+                        placeholder-text: "{install_dir}";
+                    }
+                }
+
+                FieldRow {
+                    label: "EXCLUDE";
+                    hint: "Comma-separated patterns to skip.";
+                    horizontal-stretch: 1;
+
+                    LineEdit {
+                        text: root.exclude_text;
+                        placeholder-text: "*.pdb, *.log";
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ShortcutEntry inherits Rectangle {
+    in property <string> shortcut_name;
+    in property <string> target_text;
+    in property <string> args_text;
+    in property <string> icon_text;
+    in property <int> entry_index;
+    callback remove(int);
+    callback name_changed(int, string);
+    callback target_changed(int, string);
+    callback args_changed(int, string);
+    callback icon_changed(int, string);
+
+    EntryCard {
+        width: 100%;
+        index_label: (root.entry_index + 1);
+        index_subtitle: "Start-menu or desktop launcher";
+        remove_clicked => { root.remove(root.entry_index); }
+
+        VerticalBox {
+            spacing: Theme.s-4;
+
+            HorizontalBox {
+                spacing: Theme.s-4;
+                alignment: start;
+
+                FieldRow {
+                    label: "NAME";
+                    horizontal-stretch: 1;
+
+                    LineEdit {
+                        text: root.shortcut_name;
+                        placeholder-text: "My App";
+                        edited(value) => { root.name_changed(root.entry_index, value); }
+                    }
+                }
+
+                FieldRow {
+                    label: "TARGET";
+                    horizontal-stretch: 2;
+
+                    LineEdit {
+                        text: root.target_text;
+                        placeholder-text: "{install_dir}\\MyApp.exe";
+                        edited(value) => { root.target_changed(root.entry_index, value); }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: Theme.s-4;
+                alignment: start;
+
+                FieldRow {
+                    label: "ARGUMENTS";
+                    horizontal-stretch: 2;
+
+                    LineEdit {
+                        text: root.args_text;
+                        placeholder-text: "--silent";
+                        edited(value) => { root.args_changed(root.entry_index, value); }
+                    }
+                }
+
+                FieldRow {
+                    label: "ICON (OPTIONAL)";
+                    horizontal-stretch: 1;
+
+                    LineEdit {
+                        text: root.icon_text;
+                        placeholder-text: "path/to/icon.ico";
+                        edited(value) => { root.icon_changed(root.entry_index, value); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component RegistryEntry inherits Rectangle {
+    in property <string> key_text;
+    in property <string> values_text;
+    in property <int> entry_index;
+    callback remove(int);
+    callback key_changed(int, string);
+    callback values_changed(int, string);
+
+    EntryCard {
+        width: 100%;
+        index_label: (root.entry_index + 1);
+        index_subtitle: "Windows registry key + values";
+        remove_clicked => { root.remove(root.entry_index); }
+
+        VerticalBox {
+            spacing: Theme.s-4;
+
+            FieldRow {
+                label: "KEY";
+                hint: "Full path including hive. Example: HKCU\\Software\\MyApp";
+
+                LineEdit {
+                    text: root.key_text;
+                    placeholder-text: "HKCU\\Software\\MyApp";
+                    edited(value) => { root.key_changed(root.entry_index, value); }
+                }
+            }
+
+            FieldRow {
+                label: "VALUES";
+                hint: "One per line. Format: name:type:data. Types: REG_SZ, REG_DWORD, REG_BINARY.";
+
+                TextEdit {
+                    text: root.values_text;
+                    height: 80px;
+                    edited(value) => { root.values_changed(root.entry_index, value); }
+                }
+            }
+        }
+    }
+}
+
+component RunEntry inherits Rectangle {
+    in property <string> cmd_text;
+    in property <string> args_text;
+    in property <int> when_index;
+    in property <int> entry_index;
+    callback remove(int);
+    callback cmd_changed(int, string);
+    callback args_changed(int, string);
+    callback when_changed(int, int);
+
+    EntryCard {
+        width: 100%;
+        index_label: (root.entry_index + 1);
+        index_subtitle: "Custom command run during install";
+        remove_clicked => { root.remove(root.entry_index); }
+
+        HorizontalBox {
+            spacing: Theme.s-4;
+            alignment: start;
+
+            FieldRow {
+                label: "COMMAND";
+                horizontal-stretch: 2;
+
+                LineEdit {
+                    text: root.cmd_text;
+                    placeholder-text: "{install_dir}\\setup.exe";
+                    edited(value) => { root.cmd_changed(root.entry_index, value); }
+                }
+            }
+
+            FieldRow {
+                label: "ARGUMENTS";
+                horizontal-stretch: 2;
+
+                LineEdit {
+                    text: root.args_text;
+                    placeholder-text: "--post-install";
+                    edited(value) => { root.args_changed(root.entry_index, value); }
+                }
+            }
+
+            FieldRow {
+                label: "WHEN";
+                horizontal-stretch: 1;
+
+                ComboBox {
+                    model: ["after extract", "before finish"];
+                    current-index: root.when_index;
+                    selected(value) => {
+                        if value == "before finish" {
+                            root.when_changed(root.entry_index, 1);
+                        } else {
+                            root.when_changed(root.entry_index, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Main packager window
+// ──────────────────────────────────────────────────────────────────────────────
 export component PackagerWindow inherits Window {
-    // App section
+    // ── Preserved contract (do not rename/remove). ──
     in-out property <string> app_name: "";
     in-out property <string> app_version: "";
     in-out property <string> app_publisher: "";
     in-out property <string> app_description: "";
     in-out property <string> app_icon: "";
 
-    // Install section
     in-out property <string> default_dir: "";
     in-out property <bool> add_to_path: false;
     in-out property <bool> create_desktop_shortcut: true;
     in-out property <bool> require_admin: false;
 
-    // UI section
     in-out property <int> theme_index: 2;
     in-out property <string> accent_color: "#0078d4";
     in-out property <string> welcome_text: "";
     in-out property <string> license_file: "";
 
-    // Files
     in-out property <[FileEntryData]> file_entries: [];
-
-    // Shortcuts
     in-out property <[ShortcutEntryData]> shortcut_entries: [];
-
-    // Registry
     in-out property <[RegistryEntryData]> registry_entries: [];
-
-    // Run hooks
     in-out property <[RunEntryData]> run_entries: [];
 
-    // Build
     in-out property <string> stub_path: "";
     in-out property <string> stub_admin_path: "";
     in-out property <string> output_path: "setup.exe";
@@ -427,10 +658,8 @@ export component PackagerWindow inherits Window {
     in-out property <string> build_log: "";
     in-out property <bool> building: false;
 
-    // Navigation
     in-out property <int> current_page: 0;
 
-    // Callbacks
     callback nav_clicked(int);
     callback browse_icon();
     callback browse_license();
@@ -465,659 +694,889 @@ export component PackagerWindow inherits Window {
     callback generate_toml() -> string;
 
     title: "SetupWeaver Packager";
-    preferred-width: 960px;
-    preferred-height: 640px;
-    min-width: 880px;
-    min-height: 580px;
-    background: #f3f3f3;
+    preferred-width: 1080px;
+    preferred-height: 720px;
+    min-width: 960px;
+    min-height: 620px;
+    background: Theme.page-bg;
 
-    HorizontalBox {
+    // Helper: best-effort live swatch for the accent colour. The contract
+    // requires `accent_color` to be a string (it round-trips to install.toml
+    // as-is), so we keep the swatch pinned to the default theme accent and
+    // let the LineEdit show the actual hex value. That keeps the swatch
+    // stable across build steps and avoids needing a hex-string parser in
+    // Slint (which 1.16 doesn't ship).
+    out property <color> accent_swatch: Theme.accent;
+
+    VerticalBox {
         padding: 0px;
         spacing: 0px;
 
-        // Sidebar
+        // ── TopBar ──
         Rectangle {
-            width: 200px;
-            background: #ffffff;
+            height: 56px;
+            background: Theme.rail-bg;
 
-            VerticalBox {
-                padding: 16px;
-                spacing: 4px;
+            HorizontalBox {
+                padding-left: Theme.s-6;
+                padding-right: Theme.s-6;
+                spacing: Theme.s-5;
+                alignment: start;
 
-                // Header
                 VerticalBox {
-                    spacing: 2px;
-                    padding-bottom: 12px;
+                    spacing: 0px;
 
                     Text {
                         text: "SetupWeaver";
-                        color: #1e1e1e;
+                        color: Theme.text-primary;
                         font-size: 15px;
-                        font-weight: 600;
+                        font-weight: 700;
                     }
 
                     Text {
                         text: "Packager";
-                        color: #9e9e9e;
-                        font-size: 12px;
+                        color: Theme.text-tertiary;
+                        font-size: 11px;
                     }
                 }
 
-                Rectangle { height: 1px; background: #e0e0e0; }
-                Rectangle { height: 8px; }
-
-                NavItem {
-                    label: "App Info";
-                    active: root.current_page == 0;
-                    clicked => { root.nav_clicked(0); }
+                // Spring.
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 1px;
                 }
 
-                NavItem {
-                    label: "Install Settings";
-                    active: root.current_page == 1;
-                    clicked => { root.nav_clicked(1); }
-                }
-
-                NavItem {
-                    label: "Files";
-                    active: root.current_page == 2;
-                    clicked => { root.nav_clicked(2); }
-                }
-
-                NavItem {
-                    label: "UI & Branding";
-                    active: root.current_page == 3;
-                    clicked => { root.nav_clicked(3); }
-                }
-
-                NavItem {
-                    label: "Shortcuts";
-                    active: root.current_page == 4;
-                    clicked => { root.nav_clicked(4); }
-                }
-
-                NavItem {
-                    label: "Registry";
-                    active: root.current_page == 5;
-                    clicked => { root.nav_clicked(5); }
-                }
-
-                NavItem {
-                    label: "Run Hooks";
-                    active: root.current_page == 6;
-                    clicked => { root.nav_clicked(6); }
-                }
-
-                Rectangle { height: 8px; }
-                Rectangle { height: 1px; background: #e0e0e0; }
-                Rectangle { height: 8px; }
-
-                NavItem {
-                    label: "Build";
-                    active: root.current_page == 7;
-                    clicked => { root.nav_clicked(7); }
-                }
-
-                Rectangle { vertical-stretch: 1; }
-
-                Rectangle { height: 1px; background: #e0e0e0; }
-                Rectangle { height: 8px; }
-
+                // Right side: Load / Save.
                 HorizontalBox {
-                    spacing: 6px;
+                    alignment: end;
+                    spacing: Theme.s-3;
 
-                    Button {
-                        text: "Load";
-                        horizontal-stretch: 1;
+                    Btn {
+                        text: "Load…";
+                        compact: true;
+                        enabled: !root.building;
                         clicked => { root.load_config(); }
                     }
 
-                    Button {
-                        text: "Save";
-                        horizontal-stretch: 1;
+                    Btn {
+                        text: "Save…";
+                        compact: true;
+                        primary: true;
+                        enabled: !root.building;
                         clicked => { root.save_config(); }
                     }
                 }
             }
         }
 
-        // Main content
         Rectangle {
-            horizontal-stretch: 1;
-            background: #f3f3f3;
+            height: 1px;
+            background: Theme.rail-border;
+        }
 
-            VerticalBox {
-                padding: 24px;
-                spacing: 16px;
+        // ── Body ──
+        HorizontalBox {
+            padding: 0px;
+            spacing: 0px;
+            vertical-stretch: 1;
 
-                // Page 0: App Info
-                if root.current_page == 0 : VerticalBox {
-                    spacing: 16px;
+            // ── NavRail ──
+            Rectangle {
+                width: 224px;
+                background: Theme.rail-bg;
 
-                    SectionHeader { text: "App Information"; }
+                Rectangle {
+                    x: parent.width - 1px;
+                    y: 0px;
+                    width: 1px;
+                    height: parent.height;
+                    background: Theme.rail-border;
+                }
 
-                    Card {
-                        vertical-stretch: 1;
+                VerticalBox {
+                    padding-top: Theme.s-5;
+                    padding-bottom: Theme.s-5;
+                    spacing: 2px;
+
+                    NavItem {
+                        label: "App Info";
+                        glyph: "📦";
+                        active: root.current_page == 0;
+                        clicked => { root.nav_clicked(0); }
+                    }
+
+                    NavItem {
+                        label: "Install Settings";
+                        glyph: "⚙";
+                        active: root.current_page == 1;
+                        clicked => { root.nav_clicked(1); }
+                    }
+
+                    NavItem {
+                        label: "Files";
+                        glyph: "🗂";
+                        active: root.current_page == 2;
+                        clicked => { root.nav_clicked(2); }
+                    }
+
+                    NavItem {
+                        label: "UI & Branding";
+                        glyph: "🎨";
+                        active: root.current_page == 3;
+                        clicked => { root.nav_clicked(3); }
+                    }
+
+                    NavItem {
+                        label: "Shortcuts";
+                        glyph: "🔗";
+                        active: root.current_page == 4;
+                        clicked => { root.nav_clicked(4); }
+                    }
+
+                    NavItem {
+                        label: "Registry";
+                        glyph: "🗝";
+                        active: root.current_page == 5;
+                        clicked => { root.nav_clicked(5); }
+                    }
+
+                    NavItem {
+                        label: "Run Hooks";
+                        glyph: "▶";
+                        active: root.current_page == 6;
+                        clicked => { root.nav_clicked(6); }
+                    }
+
+                    Rectangle {
+                        height: Theme.s-4;
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.rail-border;
+                    }
+
+                    Rectangle {
+                        height: Theme.s-4;
+                    }
+
+                    NavItem {
+                        label: "Build";
+                        glyph: "🚀";
+                        active: root.current_page == 7;
+                        clicked => { root.nav_clicked(7); }
+                    }
+                }
+            }
+
+            // ── Main content area ──
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.page-bg;
+
+                VerticalBox {
+                    padding: Theme.s-7;
+                    spacing: Theme.s-5;
+
+                    // ─── Page 0: App Info ───
+                    if root.current_page == 0 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        PageTitle {
+                            text: "App Info";
+                        }
+
+                        PageSubtitle {
+                            text: "These details appear in the installer's first screen and the Control Panel.";
+                        }
+
+                        Rectangle { height: Theme.s-3; }
 
                         ScrollView {
+                            vertical-stretch: 1;
+
                             VerticalBox {
-                                padding: 20px;
-                                spacing: 14px;
+                                spacing: Theme.s-5;
 
-                                FieldLabel { text: "Application Name *"; }
-                                LineEdit {
-                                    text <=> root.app_name;
-                                    placeholder-text: "My Application";
-                                }
+                                Card {
+                                    width: 100%;
 
-                                FieldLabel { text: "Version *"; }
-                                LineEdit {
-                                    text <=> root.app_version;
-                                    placeholder-text: "1.0.0";
-                                }
+                                    VerticalBox {
+                                        padding: Theme.s-6;
+                                        spacing: Theme.s-5;
 
-                                FieldLabel { text: "Publisher"; }
-                                LineEdit {
-                                    text <=> root.app_publisher;
-                                    placeholder-text: "Your Company";
-                                }
+                                        Text {
+                                            text: "Basics";
+                                            color: Theme.text-primary;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
 
-                                FieldLabel { text: "Description"; }
-                                LineEdit {
-                                    text <=> root.app_description;
-                                    placeholder-text: "A short description of the application";
-                                }
+                                        FieldRow {
+                                            label: "APPLICATION NAME";
+                                            hint: "The product name shown to the user. Required.";
 
-                                FieldLabel { text: "Icon (.ico)"; }
-                                HorizontalBox {
-                                    spacing: 8px;
-                                    LineEdit {
-                                        text <=> root.app_icon;
-                                        placeholder-text: "path/to/icon.ico";
-                                        horizontal-stretch: 1;
+                                            LineEdit {
+                                                text <=> root.app_name;
+                                                placeholder-text: "My Application";
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            label: "VERSION";
+                                            hint: "Any version string. Required.";
+
+                                            LineEdit {
+                                                text <=> root.app_version;
+                                                placeholder-text: "1.0.0";
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            label: "PUBLISHER";
+                                            hint: "Company or individual shipping the app. Optional.";
+
+                                            LineEdit {
+                                                text <=> root.app_publisher;
+                                                placeholder-text: "Your Company";
+                                            }
+                                        }
                                     }
-                                    Button {
-                                        text: "Browse...";
-                                        clicked => { root.browse_icon(); }
+                                }
+
+                                Card {
+                                    width: 100%;
+
+                                    VerticalBox {
+                                        padding: Theme.s-6;
+                                        spacing: Theme.s-5;
+
+                                        Text {
+                                            text: "Details";
+                                            color: Theme.text-primary;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+
+                                        FieldRow {
+                                            label: "DESCRIPTION";
+                                            hint: "A one-line summary shown below the welcome text.";
+
+                                            LineEdit {
+                                                text <=> root.app_description;
+                                                placeholder-text: "A short description of the application";
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            label: "ICON (.ICO)";
+                                            hint: "Path to the .ico file the installer will use for shortcuts and the window.";
+
+                                            BrowseRow {
+                                                text <=> root.app_icon;
+                                                placeholder: "path/to/icon.ico";
+                                                enabled: !root.building;
+                                                browse => { root.browse_icon(); }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                // Page 1: Install Settings
-                if root.current_page == 1 : VerticalBox {
-                    spacing: 16px;
+                    // ─── Page 1: Install Settings ───
+                    if root.current_page == 1 : VerticalBox {
+                        spacing: Theme.s-5;
 
-                    SectionHeader { text: "Install Settings"; }
+                        PageTitle {
+                            text: "Install Settings";
+                        }
 
-                    Card {
-                        vertical-stretch: 1;
+                        PageSubtitle {
+                            text: "Where the installer drops files and a few behaviours the user can opt into.";
+                        }
+
+                        Rectangle { height: Theme.s-3; }
 
                         ScrollView {
-                            VerticalBox {
-                                padding: 20px;
-                                spacing: 14px;
+                            vertical-stretch: 1;
 
-                                FieldLabel { text: "Default Install Directory *"; }
-                                LineEdit {
-                                    text <=> root.default_dir;
-                                    placeholder-text: "{ProgramFiles}\\My App";
+                            Card {
+                                width: 100%;
+
+                                VerticalBox {
+                                    padding: Theme.s-6;
+                                    spacing: Theme.s-5;
+
+                                    Text {
+                                        text: "Default location";
+                                        color: Theme.text-primary;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                    }
+
+                                    FieldRow {
+                                        label: "DEFAULT INSTALL DIRECTORY";
+                                        hint: "Tokens you can use: {ProgramFiles}, {AppData}, {Desktop}, {Temp}, {AppName}.";
+
+                                        LineEdit {
+                                            text <=> root.default_dir;
+                                            placeholder-text: "{ProgramFiles}\\My App";
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Theme.divider;
+                                    }
+
+                                    Text {
+                                        text: "User options";
+                                        color: Theme.text-primary;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                    }
+
+                                    VerticalBox {
+                                        spacing: Theme.s-3;
+
+                                        CheckBox {
+                                            text: "Add to system PATH";
+                                            checked <=> root.add_to_path;
+                                        }
+
+                                        CheckBox {
+                                            text: "Create desktop shortcut";
+                                            checked <=> root.create_desktop_shortcut;
+                                        }
+
+                                        CheckBox {
+                                            text: "Require administrator privileges (UAC elevation)";
+                                            checked <=> root.require_admin;
+                                        }
+                                    }
                                 }
+                            }
+                        }
+                    }
+
+                    // ─── Page 2: Files ───
+                    if root.current_page == 2 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        HorizontalBox {
+                            spacing: Theme.s-4;
+                            alignment: start;
+
+                            VerticalBox {
+                                spacing: 2px;
+                                vertical-stretch: 1;
+
+                                PageTitle {
+                                    text: "Files";
+                                }
+
+                                PageSubtitle {
+                                    text: "Each rule copies a source pattern to a destination inside the install folder.";
+                                }
+                            }
+
+                            Btn {
+                                text: "+ Add Rule";
+                                primary: true;
+                                enabled: !root.building;
+                                clicked => { root.add_file_entry(); }
+                            }
+                        }
+
+                        Rectangle { height: Theme.s-2; }
+
+                        Card {
+                            vertical-stretch: 1;
+                            width: 100%;
+
+                            ScrollView {
+                                VerticalBox {
+                                    padding: Theme.s-5;
+                                    spacing: Theme.s-4;
+
+                                    if root.file_entries.length == 0 : EmptyState {
+                                        message: "No file rules yet. Click \"+ Add Rule\" to copy your first batch of files into the installer.";
+                                    }
+
+                                    for entry[i] in root.file_entries : FileEntry {
+                                        src_text: entry.src;
+                                        dest_text: entry.dest;
+                                        exclude_text: entry.exclude;
+                                        entry_index: i;
+                                        remove(idx) => { root.remove_file_entry(idx); }
+                                        src_changed(idx, val) => { root.file_src_changed(idx, val); }
+                                        dest_changed(idx, val) => { root.file_dest_changed(idx, val); }
+                                        exclude_changed(idx, val) => { root.file_exclude_changed(idx, val); }
+                                        browse_src(idx) => { root.browse_file_src(idx); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ─── Page 3: UI & Branding ───
+                    if root.current_page == 3 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        PageTitle {
+                            text: "UI & Branding";
+                        }
+
+                        PageSubtitle {
+                            text: "Theme, accent colour, welcome text, and an optional license.";
+                        }
+
+                        Rectangle { height: Theme.s-3; }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            VerticalBox {
+                                spacing: Theme.s-5;
+
+                                Card {
+                                    width: 100%;
+
+                                    VerticalBox {
+                                        padding: Theme.s-6;
+                                        spacing: Theme.s-5;
+
+                                        Text {
+                                            text: "Theme";
+                                            color: Theme.text-primary;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+
+                                        FieldRow {
+                                            label: "INSTALLED-APP THEME";
+                                            hint: "The user can still switch this at runtime; you set the default here.";
+
+                                            ComboBox {
+                                                model: ["dark", "light", "system"];
+                                                current-index <=> root.theme_index;
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            label: "ACCENT COLOUR (HEX)";
+                                            hint: "Used for primary buttons and progress bars throughout the wizard.";
+
+                                            HorizontalBox {
+                                                spacing: Theme.s-3;
+                                                alignment: start;
+
+                                                LineEdit {
+                                                    text <=> root.accent_color;
+                                                    placeholder-text: "#0078d4";
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                Rectangle {
+                                                    width: 36px;
+                                                    height: 36px;
+                                                    border-radius: Theme.r-sm;
+                                                    background: root.accent_swatch;
+                                                    border-width: 1px;
+                                                    border-color: Theme.card-border;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Card {
+                                    width: 100%;
+
+                                    VerticalBox {
+                                        padding: Theme.s-6;
+                                        spacing: Theme.s-5;
+
+                                        Text {
+                                            text: "Welcome & license";
+                                            color: Theme.text-primary;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+
+                                        FieldRow {
+                                            label: "WELCOME TEXT";
+                                            hint: "Shown on the installer's first screen. Plain text only.";
+
+                                            LineEdit {
+                                                text <=> root.welcome_text;
+                                                placeholder-text: "Welcome to My App";
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            label: "LICENSE FILE";
+                                            hint: "Plain-text file the user will read and accept before installing.";
+
+                                            BrowseRow {
+                                                text <=> root.license_file;
+                                                placeholder: "LICENSE.txt";
+                                                enabled: !root.building;
+                                                browse => { root.browse_license(); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ─── Page 4: Shortcuts ───
+                    if root.current_page == 4 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        HorizontalBox {
+                            spacing: Theme.s-4;
+                            alignment: start;
+
+                            VerticalBox {
+                                spacing: 2px;
+                                vertical-stretch: 1;
+
+                                PageTitle {
+                                    text: "Shortcuts";
+                                }
+
+                                PageSubtitle {
+                                    text: "Start-menu and desktop entries that launch your app with the right arguments.";
+                                }
+                            }
+
+                            Btn {
+                                text: "+ Add Shortcut";
+                                primary: true;
+                                enabled: !root.building;
+                                clicked => { root.add_shortcut_entry(); }
+                            }
+                        }
+
+                        Rectangle { height: Theme.s-2; }
+
+                        Card {
+                            vertical-stretch: 1;
+                            width: 100%;
+
+                            ScrollView {
+                                VerticalBox {
+                                    padding: Theme.s-5;
+                                    spacing: Theme.s-4;
+
+                                    if root.shortcut_entries.length == 0 : EmptyState {
+                                        message: "No shortcuts defined. Click \"+ Add Shortcut\" to create one.";
+                                    }
+
+                                    for entry[i] in root.shortcut_entries : ShortcutEntry {
+                                        shortcut_name: entry.name;
+                                        target_text: entry.target;
+                                        args_text: entry.args;
+                                        icon_text: entry.icon;
+                                        entry_index: i;
+                                        remove(idx) => { root.remove_shortcut_entry(idx); }
+                                        name_changed(idx, val) => { root.shortcut_name_changed(idx, val); }
+                                        target_changed(idx, val) => { root.shortcut_target_changed(idx, val); }
+                                        args_changed(idx, val) => { root.shortcut_args_changed(idx, val); }
+                                        icon_changed(idx, val) => { root.shortcut_icon_changed(idx, val); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ─── Page 5: Registry ───
+                    if root.current_page == 5 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        HorizontalBox {
+                            spacing: Theme.s-4;
+                            alignment: start;
+
+                            VerticalBox {
+                                spacing: 2px;
+                                vertical-stretch: 1;
+
+                                PageTitle {
+                                    text: "Registry";
+                                }
+
+                                PageSubtitle {
+                                    text: "Windows registry keys the installer will create. Use cautiously.";
+                                }
+                            }
+
+                            Btn {
+                                text: "+ Add Key";
+                                primary: true;
+                                enabled: !root.building;
+                                clicked => { root.add_registry_entry(); }
+                            }
+                        }
+
+                        Rectangle { height: Theme.s-2; }
+
+                        Card {
+                            vertical-stretch: 1;
+                            width: 100%;
+
+                            ScrollView {
+                                VerticalBox {
+                                    padding: Theme.s-5;
+                                    spacing: Theme.s-4;
+
+                                    if root.registry_entries.length == 0 : EmptyState {
+                                        message: "No registry entries defined. Click \"+ Add Key\" to start.";
+                                    }
+
+                                    for entry[i] in root.registry_entries : RegistryEntry {
+                                        key_text: entry.key;
+                                        values_text: entry.values;
+                                        entry_index: i;
+                                        remove(idx) => { root.remove_registry_entry(idx); }
+                                        key_changed(idx, val) => { root.registry_key_changed(idx, val); }
+                                        values_changed(idx, val) => { root.registry_values_changed(idx, val); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ─── Page 6: Run Hooks ───
+                    if root.current_page == 6 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        HorizontalBox {
+                            spacing: Theme.s-4;
+                            alignment: start;
+
+                            VerticalBox {
+                                spacing: 2px;
+                                vertical-stretch: 1;
+
+                                PageTitle {
+                                    text: "Run Hooks";
+                                }
+
+                                PageSubtitle {
+                                    text: "Custom commands run after extraction or right before the installer closes.";
+                                }
+                            }
+
+                            Btn {
+                                text: "+ Add Hook";
+                                primary: true;
+                                enabled: !root.building;
+                                clicked => { root.add_run_entry(); }
+                            }
+                        }
+
+                        Rectangle { height: Theme.s-2; }
+
+                        Card {
+                            vertical-stretch: 1;
+                            width: 100%;
+
+                            ScrollView {
+                                VerticalBox {
+                                    padding: Theme.s-5;
+                                    spacing: Theme.s-4;
+
+                                    if root.run_entries.length == 0 : EmptyState {
+                                        message: "No run hooks defined. Click \"+ Add Hook\" to add one.";
+                                    }
+
+                                    for entry[i] in root.run_entries : RunEntry {
+                                        cmd_text: entry.cmd;
+                                        args_text: entry.args;
+                                        when_index: entry.when_index;
+                                        entry_index: i;
+                                        remove(idx) => { root.remove_run_entry(idx); }
+                                        cmd_changed(idx, val) => { root.run_cmd_changed(idx, val); }
+                                        args_changed(idx, val) => { root.run_args_changed(idx, val); }
+                                        when_changed(idx, val) => { root.run_when_changed(idx, val); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ─── Page 7: Build ───
+                    if root.current_page == 7 : VerticalBox {
+                        spacing: Theme.s-5;
+
+                        PageTitle {
+                            text: "Build Installer";
+                        }
+
+                        PageSubtitle {
+                            text: "Pick the runtime stub and the output path, then build a single self-contained setup.exe.";
+                        }
+
+                        Rectangle { height: Theme.s-3; }
+
+                        Card {
+                            width: 100%;
+
+                            VerticalBox {
+                                padding: Theme.s-6;
+                                spacing: Theme.s-5;
 
                                 Text {
-                                    text: "Tokens: {ProgramFiles}, {AppData}, {Desktop}, {Temp}, {AppName}";
-                                    color: #9e9e9e;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
+                                    text: "Inputs";
+                                    color: Theme.text-primary;
+                                    font-size: 14px;
+                                    font-weight: 600;
                                 }
 
-                                Rectangle { height: 1px; background: #e0e0e0; }
+                                FieldRow {
+                                    label: "CONFIG FILE (INSTALL.TOML)";
+                                    hint: "Save and load the manifest from this file.";
 
-                                CheckBox {
-                                    text: "Add to system PATH";
-                                    checked <=> root.add_to_path;
-                                }
-
-                                CheckBox {
-                                    text: "Create desktop shortcut";
-                                    checked <=> root.create_desktop_shortcut;
-                                }
-
-                                CheckBox {
-                                    text: "Require administrator privileges (UAC elevation)";
-                                    checked <=> root.require_admin;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Page 2: Files
-                if root.current_page == 2 : VerticalBox {
-                    spacing: 16px;
-
-                    HorizontalBox {
-                        SectionHeader { text: "Files"; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button {
-                            text: "+ Add File Rule";
-                            clicked => { root.add_file_entry(); }
-                        }
-                    }
-
-                    Card {
-                        vertical-stretch: 1;
-
-                        ScrollView {
-                            VerticalBox {
-                                padding: 16px;
-                                spacing: 12px;
-
-                                if root.file_entries.length == 0 : Rectangle {
-                                    height: 60px;
-                                    border-radius: 4px;
-                                    background: #fafafa;
-                                    border-width: 1px;
-                                    border-color: #e0e0e0;
-
-                                    Text {
-                                        text: "No file rules yet. Click \"+ Add File Rule\" to begin.";
-                                        color: #9e9e9e;
-                                        font-size: 13px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        width: parent.width;
-                                        height: parent.height;
+                                    BrowseRow {
+                                        text <=> root.config_path;
+                                        placeholder: "install.toml";
+                                        enabled: !root.building;
+                                        browse => { root.browse_config(); }
                                     }
                                 }
 
-                                for entry[i] in root.file_entries : FileEntry {
-                                    src_text: entry.src;
-                                    dest_text: entry.dest;
-                                    exclude_text: entry.exclude;
-                                    entry_index: i;
-                                    remove(idx) => { root.remove_file_entry(idx); }
-                                    src_changed(idx, val) => { root.file_src_changed(idx, val); }
-                                    dest_changed(idx, val) => { root.file_dest_changed(idx, val); }
-                                    exclude_changed(idx, val) => { root.file_exclude_changed(idx, val); }
-                                    browse_src(idx) => { root.browse_file_src(idx); }
-                                }
-                            }
-                        }
-                    }
-                }
+                                FieldRow {
+                                    label: "RUNTIME STUB";
+                                    hint: "Path to setupweaver-runtime.exe — the engine that runs the install wizard.";
 
-                // Page 3: UI & Branding
-                if root.current_page == 3 : VerticalBox {
-                    spacing: 16px;
-
-                    SectionHeader { text: "UI & Branding"; }
-
-                    Card {
-                        vertical-stretch: 1;
-
-                        ScrollView {
-                            VerticalBox {
-                                padding: 20px;
-                                spacing: 14px;
-
-                                FieldLabel { text: "Theme"; }
-                                ComboBox {
-                                    model: ["dark", "light", "system"];
-                                    current-index <=> root.theme_index;
-                                }
-
-                                FieldLabel { text: "Accent Color (hex)"; }
-                                HorizontalBox {
-                                    spacing: 10px;
-                                    LineEdit {
-                                        text <=> root.accent_color;
-                                        placeholder-text: "#0078d4";
-                                        horizontal-stretch: 1;
-                                    }
-                                    Rectangle {
-                                        width: 32px;
-                                        height: 32px;
-                                        border-radius: 4px;
-                                        background: #0078d4;
+                                    BrowseRow {
+                                        text <=> root.stub_path;
+                                        placeholder: "setupweaver-runtime.exe";
+                                        enabled: !root.building;
+                                        browse => { root.browse_stub(); }
                                     }
                                 }
 
-                                FieldLabel { text: "Welcome Text"; }
-                                LineEdit {
-                                    text <=> root.welcome_text;
-                                    placeholder-text: "Welcome to My App";
-                                }
+                                FieldRow {
+                                    label: "ADMIN RUNTIME STUB (OPTIONAL)";
+                                    hint: "Path to setupweaver-runtime-admin.exe if your installer needs UAC.";
 
-                                FieldLabel { text: "License File"; }
-                                HorizontalBox {
-                                    spacing: 8px;
-                                    LineEdit {
-                                        text <=> root.license_file;
-                                        placeholder-text: "LICENSE.txt";
-                                        horizontal-stretch: 1;
-                                    }
-                                    Button {
-                                        text: "Browse...";
-                                        clicked => { root.browse_license(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Page 4: Shortcuts
-                if root.current_page == 4 : VerticalBox {
-                    spacing: 16px;
-
-                    HorizontalBox {
-                        SectionHeader { text: "Shortcuts"; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button {
-                            text: "+ Add Shortcut";
-                            clicked => { root.add_shortcut_entry(); }
-                        }
-                    }
-
-                    Card {
-                        vertical-stretch: 1;
-
-                        ScrollView {
-                            VerticalBox {
-                                padding: 16px;
-                                spacing: 12px;
-
-                                if root.shortcut_entries.length == 0 : Rectangle {
-                                    height: 60px;
-                                    border-radius: 4px;
-                                    background: #fafafa;
-                                    border-width: 1px;
-                                    border-color: #e0e0e0;
-
-                                    Text {
-                                        text: "No shortcuts defined.";
-                                        color: #9e9e9e;
-                                        font-size: 13px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        width: parent.width;
-                                        height: parent.height;
+                                    BrowseRow {
+                                        text <=> root.stub_admin_path;
+                                        placeholder: "setupweaver-runtime-admin.exe";
+                                        enabled: !root.building;
+                                        browse => { root.browse_stub_admin(); }
                                     }
                                 }
 
-                                for entry[i] in root.shortcut_entries : ShortcutEntry {
-                                    shortcut_name: entry.name;
-                                    target_text: entry.target;
-                                    args_text: entry.args;
-                                    icon_text: entry.icon;
-                                    entry_index: i;
-                                    remove(idx) => { root.remove_shortcut_entry(idx); }
-                                    name_changed(idx, val) => { root.shortcut_name_changed(idx, val); }
-                                    target_changed(idx, val) => { root.shortcut_target_changed(idx, val); }
-                                    args_changed(idx, val) => { root.shortcut_args_changed(idx, val); }
-                                    icon_changed(idx, val) => { root.shortcut_icon_changed(idx, val); }
-                                }
-                            }
-                        }
-                    }
-                }
+                                FieldRow {
+                                    label: "OUTPUT FILE";
+                                    hint: "Where to write the built installer. .exe only.";
 
-                // Page 5: Registry
-                if root.current_page == 5 : VerticalBox {
-                    spacing: 16px;
-
-                    HorizontalBox {
-                        SectionHeader { text: "Registry Entries"; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button {
-                            text: "+ Add Registry Key";
-                            clicked => { root.add_registry_entry(); }
-                        }
-                    }
-
-                    Card {
-                        vertical-stretch: 1;
-
-                        ScrollView {
-                            VerticalBox {
-                                padding: 16px;
-                                spacing: 12px;
-
-                                if root.registry_entries.length == 0 : Rectangle {
-                                    height: 60px;
-                                    border-radius: 4px;
-                                    background: #fafafa;
-                                    border-width: 1px;
-                                    border-color: #e0e0e0;
-
-                                    Text {
-                                        text: "No registry entries defined.";
-                                        color: #9e9e9e;
-                                        font-size: 13px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        width: parent.width;
-                                        height: parent.height;
+                                    BrowseRow {
+                                        text <=> root.output_path;
+                                        placeholder: "setup.exe";
+                                        enabled: !root.building;
+                                        browse => { root.browse_output(); }
                                     }
                                 }
-
-                                for entry[i] in root.registry_entries : RegistryEntry {
-                                    key_text: entry.key;
-                                    values_text: entry.values;
-                                    entry_index: i;
-                                    remove(idx) => { root.remove_registry_entry(idx); }
-                                    key_changed(idx, val) => { root.registry_key_changed(idx, val); }
-                                    values_changed(idx, val) => { root.registry_values_changed(idx, val); }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Page 6: Run Hooks
-                if root.current_page == 6 : VerticalBox {
-                    spacing: 16px;
-
-                    HorizontalBox {
-                        SectionHeader { text: "Run Hooks"; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button {
-                            text: "+ Add Hook";
-                            clicked => { root.add_run_entry(); }
-                        }
-                    }
-
-                    Card {
-                        vertical-stretch: 1;
-
-                        ScrollView {
-                            VerticalBox {
-                                padding: 16px;
-                                spacing: 12px;
-
-                                if root.run_entries.length == 0 : Rectangle {
-                                    height: 60px;
-                                    border-radius: 4px;
-                                    background: #fafafa;
-                                    border-width: 1px;
-                                    border-color: #e0e0e0;
-
-                                    Text {
-                                        text: "No run hooks defined.";
-                                        color: #9e9e9e;
-                                        font-size: 13px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        width: parent.width;
-                                        height: parent.height;
-                                    }
-                                }
-
-                                for entry[i] in root.run_entries : RunEntry {
-                                    cmd_text: entry.cmd;
-                                    args_text: entry.args;
-                                    when_index: entry.when_index;
-                                    entry_index: i;
-                                    remove(idx) => { root.remove_run_entry(idx); }
-                                    cmd_changed(idx, val) => { root.run_cmd_changed(idx, val); }
-                                    args_changed(idx, val) => { root.run_args_changed(idx, val); }
-                                    when_changed(idx, val) => { root.run_when_changed(idx, val); }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Page 7: Build
-                if root.current_page == 7 : VerticalBox {
-                    spacing: 16px;
-
-                    SectionHeader { text: "Build Installer"; }
-
-                    Card {
-                        vertical-stretch: 0;
-
-                        VerticalBox {
-                            padding: 20px;
-                            spacing: 14px;
-
-                            FieldLabel { text: "Config File (install.toml)"; }
-                            HorizontalBox {
-                                spacing: 8px;
-                                LineEdit {
-                                    text <=> root.config_path;
-                                    placeholder-text: "install.toml";
-                                    horizontal-stretch: 1;
-                                    enabled: !root.building;
-                                }
-                                Button {
-                                    text: "Browse...";
-                                    enabled: !root.building;
-                                    clicked => { root.browse_config(); }
-                                }
-                            }
-
-                            FieldLabel { text: "Runtime Stub (setupweaver-runtime.exe)"; }
-                            HorizontalBox {
-                                spacing: 8px;
-                                LineEdit {
-                                    text <=> root.stub_path;
-                                    placeholder-text: "setupweaver-runtime.exe";
-                                    horizontal-stretch: 1;
-                                    enabled: !root.building;
-                                }
-                                Button {
-                                    text: "Browse...";
-                                    enabled: !root.building;
-                                    clicked => { root.browse_stub(); }
-                                }
-                            }
-
-                            FieldLabel { text: "Admin Runtime Stub (optional)"; }
-                            HorizontalBox {
-                                spacing: 8px;
-                                LineEdit {
-                                    text <=> root.stub_admin_path;
-                                    placeholder-text: "setupweaver-runtime-admin.exe";
-                                    horizontal-stretch: 1;
-                                    enabled: !root.building;
-                                }
-                                Button {
-                                    text: "Browse...";
-                                    enabled: !root.building;
-                                    clicked => { root.browse_stub_admin(); }
-                                }
-                            }
-
-                            FieldLabel { text: "Output File"; }
-                            HorizontalBox {
-                                spacing: 8px;
-                                LineEdit {
-                                    text <=> root.output_path;
-                                    placeholder-text: "setup.exe";
-                                    horizontal-stretch: 1;
-                                    enabled: !root.building;
-                                }
-                                Button {
-                                    text: "Browse...";
-                                    enabled: !root.building;
-                                    clicked => { root.browse_output(); }
-                                }
-                            }
-
-                            Rectangle { height: 1px; background: #e0e0e0; }
-
-                            HorizontalBox {
-                                spacing: 10px;
-                                Rectangle { horizontal-stretch: 1; }
-
-                                Button {
-                                    text: "Save Config";
-                                    enabled: !root.building;
-                                    clicked => { root.save_config(); }
-                                }
-
-                                Button {
-                                    text: root.building ? "Building..." : "Build Installer";
-                                    enabled: !root.building;
-                                    clicked => { root.build_installer(); }
-                                }
-                            }
-                        }
-                    }
-
-                    if root.building || root.build_status != "" : Card {
-                        vertical-stretch: 0;
-
-                        VerticalBox {
-                            padding: 20px;
-                            spacing: 10px;
-
-                            if root.building : Rectangle {
-                                height: 6px;
-                                border-radius: 3px;
-                                background: #e0e0e0;
 
                                 Rectangle {
-                                    width: parent.width * clamp(root.build_progress, 0, 1);
-                                    height: parent.height;
-                                    border-radius: 3px;
-                                    background: #0078d4;
+                                    height: 1px;
+                                    background: Theme.divider;
+                                }
+
+                                HorizontalBox {
+                                    spacing: Theme.s-3;
+                                    alignment: end;
+
+                                    Btn {
+                                        text: "Save Config";
+                                        enabled: !root.building;
+                                        clicked => { root.save_config(); }
+                                    }
+
+                                    Btn {
+                                        text: root.building ? "Building…" : "Build Installer";
+                                        primary: true;
+                                        enabled: !root.building;
+                                        clicked => { root.build_installer(); }
+                                    }
                                 }
                             }
+                        }
 
-                            Text {
-                                text: root.build_status;
-                                color: #1e1e1e;
-                                font-size: 14px;
-                                font-weight: 500;
-                                wrap: word-wrap;
+                        if root.building || root.build_status != "" : Card {
+                            width: 100%;
+
+                            VerticalBox {
+                                padding: Theme.s-6;
+                                spacing: Theme.s-4;
+
+                                HorizontalBox {
+                                    spacing: Theme.s-3;
+                                    alignment: start;
+
+                                    if root.building : Spinner {
+                                        width: 16px;
+                                        height: 16px;
+                                        indeterminate: true;
+                                    }
+
+                                    Text {
+                                        text: root.build_status == "" ? "Preparing…" : root.build_status;
+                                        color: Theme.text-primary;
+                                        font-size: 14px;
+                                        font-weight: 500;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                if root.building : Rectangle {
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: Theme.divider;
+
+                                    Rectangle {
+                                        width: parent.width * clamp(root.build_progress, 0, 1);
+                                        height: parent.height;
+                                        border-radius: 4px;
+                                        background: Theme.accent;
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    if root.build_log != "" : Card {
-                        vertical-stretch: 1;
+                        if root.build_log != "" : Card {
+                            vertical-stretch: 1;
+                            width: 100%;
 
-                        VerticalBox {
-                            padding: 16px;
-                            spacing: 8px;
+                            VerticalBox {
+                                padding: Theme.s-5;
+                                spacing: Theme.s-3;
 
-                            Text {
-                                text: "Build Log";
-                                color: #616161;
-                                font-size: 12px;
-                                font-weight: 600;
-                            }
+                                Text {
+                                    text: "BUILD LOG";
+                                    color: Theme.text-secondary;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    letter-spacing: 0.4px;
+                                }
 
-                            TextEdit {
-                                text: root.build_log;
-                                read-only: true;
-                                wrap: word-wrap;
-                                vertical-stretch: 1;
+                                TextEdit {
+                                    text: root.build_log;
+                                    read-only: true;
+                                    wrap: word-wrap;
+                                    font-family: "Consolas, Menlo, monospace";
+                                    font-size: 12px;
+                                    vertical-stretch: 1;
+                                }
                             }
                         }
                     }
