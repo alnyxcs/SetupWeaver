@@ -152,13 +152,18 @@ component FieldHint inherits Text {
 }
 
 // A labelled, optional-help input row.
+//
+// `required: true` makes the label red and appends a `*` so the user
+// immediately sees which fields can't be left blank. The contract
+// (FieldRow used by the App Info / Install / UI pages) stays the same.
 component FieldRow inherits VerticalBox {
     in property <string> label: "";
     in property <string> hint: "";
+    in property <bool> required: false;
     spacing: 6px;
 
     FieldLabel {
-        text: root.label;
+        text: root.required ? (root.label + "  *") : root.label;
         visible: root.label != "";
     }
 
@@ -192,14 +197,19 @@ component EmptyState inherits Rectangle {
 }
 
 // One row in the left NavRail.
+//
+// The previous version rendered an emoji glyph next to the label, but emoji
+// glyphs render with wildly different visual weights across Windows builds
+// (📦, 🎨, ▶, 🚀 etc. don't share metrics). Replacing the glyph with a
+// consistent accent-bar + bold-text treatment keeps the rail readable and
+// professional on every machine.
 component NavItem inherits Rectangle {
     in property <string> label: "";
-    in property <string> glyph: "";
     in property <bool> active: false;
 
     callback clicked();
 
-    height: 40px;
+    height: 38px;
     border-radius: 0px;
     background: root.active ? Theme.rail-active-bg : Theme.rail-bg;
 
@@ -216,27 +226,16 @@ component NavItem inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    HorizontalBox {
-        padding-left: Theme.s-5;
-        padding-right: Theme.s-5;
-        spacing: Theme.s-3;
-
-        Text {
-            text: root.glyph;
-            font-size: 14px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            width: 18px;
-            color: root.active ? Theme.accent : Theme.text-secondary;
-        }
-
-        Text {
-            text: root.label;
-            color: root.active ? Theme.text-primary : Theme.text-body;
-            font-size: 13px;
-            font-weight: root.active ? 600 : 500;
-            vertical-alignment: center;
-        }
+    Text {
+        x: Theme.s-5;
+        y: 0px;
+        width: parent.width - Theme.s-5 * 2;
+        height: parent.height;
+        text: root.label;
+        color: root.active ? Theme.text-primary : Theme.text-body;
+        font-size: 13px;
+        font-weight: root.active ? 600 : 500;
+        vertical-alignment: center;
     }
 }
 
@@ -549,7 +548,7 @@ component RegistryEntry inherits Rectangle {
 
             FieldRow {
                 label: "VALUES";
-                hint: "One per line. Format: name:type:data. Types: REG_SZ, REG_DWORD, REG_BINARY.";
+                hint: "One per line in the form name:TYPE:data. Example: Version:REG_SZ:1.0.0. Types: REG_SZ (string), REG_DWORD (decimal int), REG_BINARY (hex).";
 
                 TextEdit {
                     text: root.values_text;
@@ -800,49 +799,42 @@ export component PackagerWindow inherits Window {
 
                     NavItem {
                         label: "App Info";
-                        glyph: "📦";
                         active: root.current_page == 0;
                         clicked => { root.nav_clicked(0); }
                     }
 
                     NavItem {
                         label: "Install Settings";
-                        glyph: "⚙";
                         active: root.current_page == 1;
                         clicked => { root.nav_clicked(1); }
                     }
 
                     NavItem {
                         label: "Files";
-                        glyph: "🗂";
                         active: root.current_page == 2;
                         clicked => { root.nav_clicked(2); }
                     }
 
                     NavItem {
                         label: "UI & Branding";
-                        glyph: "🎨";
                         active: root.current_page == 3;
                         clicked => { root.nav_clicked(3); }
                     }
 
                     NavItem {
                         label: "Shortcuts";
-                        glyph: "🔗";
                         active: root.current_page == 4;
                         clicked => { root.nav_clicked(4); }
                     }
 
                     NavItem {
                         label: "Registry";
-                        glyph: "🗝";
                         active: root.current_page == 5;
                         clicked => { root.nav_clicked(5); }
                     }
 
                     NavItem {
                         label: "Run Hooks";
-                        glyph: "▶";
                         active: root.current_page == 6;
                         clicked => { root.nav_clicked(6); }
                     }
@@ -862,7 +854,6 @@ export component PackagerWindow inherits Window {
 
                     NavItem {
                         label: "Build";
-                        glyph: "🚀";
                         active: root.current_page == 7;
                         clicked => { root.nav_clicked(7); }
                     }
@@ -915,6 +906,7 @@ export component PackagerWindow inherits Window {
                                         FieldRow {
                                             label: "APPLICATION NAME";
                                             hint: "The product name shown to the user. Required.";
+                                            required: true;
 
                                             LineEdit {
                                                 text <=> root.app_name;
@@ -925,6 +917,7 @@ export component PackagerWindow inherits Window {
                                         FieldRow {
                                             label: "VERSION";
                                             hint: "Any version string. Required.";
+                                            required: true;
 
                                             LineEdit {
                                                 text <=> root.app_version;
@@ -1157,7 +1150,7 @@ export component PackagerWindow inherits Window {
 
                                         FieldRow {
                                             label: "INSTALLED-APP THEME";
-                                            hint: "The user can still switch this at runtime; you set the default here.";
+                                            hint: "The default colour scheme when the installer starts. The user can still switch this at runtime.";
 
                                             ComboBox {
                                                 model: ["dark", "light", "system"];
@@ -1511,8 +1504,15 @@ export component PackagerWindow inherits Window {
                             }
                         }
 
-                        if root.building || root.build_status != "" : Card {
+                        // Build status: show a Spinner + progress bar while
+                        // building, then a coloured summary card (green on
+                        // success, red on failure) once the build has
+                        // finished. This gives the user a clear, glanceable
+                        // answer to "did the build work?" without having to
+                        // scroll the log.
+                        if root.building || root.build_log != "" || root.build_status != "" : Card {
                             width: 100%;
+                            danger: !root.building && root.build_progress < 1.0 && root.build_log != "";
 
                             VerticalBox {
                                 padding: Theme.s-6;
@@ -1528,13 +1528,68 @@ export component PackagerWindow inherits Window {
                                         indeterminate: true;
                                     }
 
+                                    // Success / failure / building glyph.
+                                    Rectangle {
+                                        width: 18px;
+                                        height: 18px;
+                                        border-radius: 9px;
+                                        background: !root.building && root.build_progress < 1.0 && root.build_log != ""
+                                            ? Theme.error
+                                            : (root.building
+                                                ? Theme.card-bg
+                                                : Theme.success);
+
+                                        Text {
+                                            text: !root.building
+                                                ? (root.build_progress < 1.0 && root.build_log != "" ? "!" : "✓")
+                                                : "";
+                                            color: white;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            width: parent.width;
+                                            height: parent.height;
+                                        }
+                                    }
+
                                     Text {
-                                        text: root.build_status == "" ? "Preparing…" : root.build_status;
-                                        color: Theme.text-primary;
+                                        text: root.building
+                                            ? (root.build_status == "" ? "Building installer…" : root.build_status)
+                                            : (
+                                                root.build_progress >= 1.0
+                                                    ? "Installer built successfully"
+                                                    : (root.build_status == "" ? "Build finished" : root.build_status)
+                                            );
+                                        color: !root.building && root.build_progress < 1.0 && root.build_log != ""
+                                            ? Theme.error
+                                            : Theme.text-primary;
                                         font-size: 14px;
-                                        font-weight: 500;
+                                        font-weight: 600;
                                         wrap: word-wrap;
                                         vertical-alignment: center;
+                                    }
+                                }
+
+                                // Show the output path on success so the
+                                // user knows where the file landed.
+                                if !root.building && root.build_progress >= 1.0 && root.output_path != "" : HorizontalBox {
+                                    spacing: Theme.s-2;
+                                    alignment: start;
+
+                                    Text {
+                                        text: "Output:";
+                                        color: Theme.text-secondary;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+
+                                    Text {
+                                        text: root.output_path;
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        font-family: "Consolas, Menlo, monospace";
+                                        wrap: no-wrap;
                                     }
                                 }
 
