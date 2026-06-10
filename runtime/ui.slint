@@ -22,6 +22,7 @@ global Theme {
     out property <color> page-bg: #f7f8fa;
     out property <color> card-bg: #ffffff;
     out property <color> card-border: #e6e8ec;
+    out property <color> input-border: #c4c9d0;
     out property <color> divider: #eceef2;
 
     // Text palette.
@@ -586,10 +587,22 @@ export component InstallerWindow inherits Window {
                                     text: "INSTALL LOCATION";
                                 }
 
-                                LineEdit {
-                                    text <=> root.install_dir;
-                                    enabled: !root.install_running;
-                                    placeholder-text: "C:\\Program Files\\...";
+                                // Slint 1.16.1's std-widgets LineEdit uses a 1px
+                                // #e6e8ec border on a near-white control-background,
+                                // which visually disappears against a white Card.
+                                // The wrapper provides a visible frame.
+                                Rectangle {
+                                    min-height: 36px;
+                                    horizontal-stretch: 1;
+                                    background: Theme.card-bg;
+                                    border-width: 1px;
+                                    border-color: Theme.input-border;
+                                    border-radius: Theme.r-sm;
+                                    LineEdit {
+                                        text <=> root.install_dir;
+                                        enabled: !root.install_running;
+                                        placeholder-text: "C:\\Program Files\\...";
+                                    }
                                 }
 
                                 FieldHint {

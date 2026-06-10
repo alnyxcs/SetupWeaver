@@ -50,6 +50,7 @@ pub fn run_installer(engine: &InstallerEngine, install_dir_override: Option<&Pat
     window.set_license_text(manifest.license_text.unwrap_or_default().into());
     window.set_install_dir(install_dir.display().to_string().into());
     window.set_status_text("Ready to install".into());
+    window.set_status_glyph("🎯".into());
     window.set_detail_text("Files will be extracted directly from the embedded payload.".into());
     window.set_error_text("".into());
     window.set_current_screen(SCREEN_WELCOME);
@@ -99,6 +100,7 @@ pub fn run_installer(engine: &InstallerEngine, install_dir_override: Option<&Pat
             if let Some(window) = window_weak.upgrade() {
                 window.set_current_screen(SCREEN_WELCOME);
                 window.set_status_text("Ready to install".into());
+                window.set_status_glyph("🎯".into());
                 window.set_detail_text("Choose where the app will be installed.".into());
             }
         });
@@ -171,6 +173,7 @@ pub fn run_installer(engine: &InstallerEngine, install_dir_override: Option<&Pat
                     if let Some(window) = window_weak.upgrade() {
                         window.set_current_screen(SCREEN_LICENSE);
                         window.set_status_text("Review license".into());
+                        window.set_status_glyph("📄".into());
                         window.set_detail_text("Read the license and continue when ready.".into());
                     }
                 }
@@ -204,6 +207,7 @@ fn start_install(window_weak: slint::Weak<InstallerWindow>, state: Arc<Mutex<UiS
             window.set_install_running(true);
             window.set_progress_value(0.02);
             window.set_status_text("Preparing installer".into());
+            window.set_status_glyph("⏳".into());
             window.set_detail_text(install_dir.clone().into());
             state.lock().expect("ui state poisoned").install_running = true;
             install_dir
@@ -220,6 +224,7 @@ fn start_install(window_weak: slint::Weak<InstallerWindow>, state: Arc<Mutex<UiS
             })?;
             window_weak.upgrade_in_event_loop(|window| {
                 window.set_status_text("Launching finish tasks".into());
+                window.set_status_glyph("✨".into());
                 window.set_detail_text("Running final actions.".into());
                 window.set_progress_value(0.995);
             })?;
@@ -235,6 +240,7 @@ fn start_install(window_weak: slint::Weak<InstallerWindow>, state: Arc<Mutex<UiS
                     window.set_current_screen(SCREEN_FINISH);
                     window.set_progress_value(1.0);
                     window.set_status_text("Installation complete".into());
+                    window.set_status_glyph("✓".into());
                     window.set_detail_text("Everything is ready to go.".into());
                 });
             }
@@ -246,6 +252,7 @@ fn start_install(window_weak: slint::Weak<InstallerWindow>, state: Arc<Mutex<UiS
                     window.set_current_screen(SCREEN_ERROR);
                     window.set_error_text(message.clone().into());
                     window.set_status_text("Installation failed".into());
+                    window.set_status_glyph("⚠".into());
                     window.set_detail_text("See the error details below.".into());
                 });
             }
@@ -267,6 +274,7 @@ fn report_progress(window_weak: &slint::Weak<InstallerWindow>, progress: Install
         window.set_current_screen(SCREEN_INSTALL);
         window.set_progress_value(progress_value);
         window.set_status_text(status.into());
+        window.set_status_glyph(phase_glyph(progress.phase).into());
         window.set_detail_text(detail.into());
     });
 }
@@ -283,6 +291,19 @@ fn progress_summary(progress: &InstallProgress) -> String {
         ),
         InstallPhase::Configuring => String::from("Applying machine settings"),
         InstallPhase::Finishing => String::from("Finalizing installation"),
+    }
+}
+
+/// Map an [`InstallPhase`] to a single-glyph icon that gives the user a
+/// instant visual cue of which stage the installer is in. Returned as a
+/// `SharedString` so the caller can pass it straight to
+/// `window.set_status_glyph`.
+fn phase_glyph(phase: InstallPhase) -> &'static str {
+    match phase {
+        InstallPhase::Preparing => "⏳",
+        InstallPhase::Extracting => "📦",
+        InstallPhase::Configuring => "⚙",
+        InstallPhase::Finishing => "✨",
     }
 }
 
